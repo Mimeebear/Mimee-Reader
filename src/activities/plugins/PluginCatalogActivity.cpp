@@ -3,16 +3,16 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <FreeInkUIIcon.h>
-#include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <JsonListParser.h>
 #include <Logging.h>
 #include <MD5Builder.h>
 #include <Memory.h>
 #include <SecureHttpClient.h>
 #include <WiFi.h>
-#include <XmlParserUtils.h>
+#include <XmlListParser.h>
 #include <strings.h>
 
 #include <algorithm>
@@ -20,12 +20,7 @@
 #include <new>
 
 #include "MappedInputManager.h"
-// ReaderActivity is needed for the readme-open path below
-// (ReaderActivity::create at the Background/readme branch). Upstream's refactor
-// dropped SilentRestart.h, WifiSelectionActivity.h, and
-// KeyboardEntryActivity.h; none of them is referenced in this file any more, so
-// they stay dropped.
-#include "activities/reader/ReaderActivity.h"
+#include "activities/reader/ReaderActivity.h"  // README viewer
 #include "components/CatalogScreens.h"
 #include "components/UITheme.h"
 #include "network/HttpDownloader.h"
@@ -35,14 +30,11 @@
 #include "util/PluginLocations.h"
 #include "util/QrUtils.h"
 #include "util/StringUtils.h"
-#include "util/UrlUtils.h"
 
 namespace fui = freeink::ui;
 
 // Template/JSON/transport primitives shared with the plugin event drain.
 using pluginhttp::resolvePath;
-using pluginhttp::segIsIndex;
-using pluginhttp::splitPath;
 using pluginhttp::substituteAll;
 using pluginhttp::urlEncodeQuery;
 using pluginhttp::variantToString;
@@ -59,58 +51,6 @@ constexpr size_t MAX_API_RESPONSE = 48 * 1024;
 constexpr char BROWSE_TMP_PATH[] = "/.pcat_tmp.json";
 constexpr size_t MAX_BROWSE_RESPONSE = 1024 * 1024;
 constexpr int MAX_PAGE_SIZE = 16;
-
-// Builds an ArduinoJson deserialization filter keeping only one dotted path.
-// A numeric segment becomes filter index [0], which ArduinoJson applies to
-// every array element. Filtering keeps the parsed document to a few KB where
-// the unfiltered catalog response would cost several times the body size.
-void addFilterPath(JsonDocument& filter, const std::vector<std::string>& segs) {
-  JsonVariant node = filter.as<JsonVariant>();
-  for (size_t i = 0; i < segs.size(); i++) {
-    const bool last = i + 1 == segs.size();
-    if (segIsIndex(segs[i])) {
-      JsonArray arr = node.is<JsonArray>() ? node.as<JsonArray>() : node.to<JsonArray>();
-      if (last) {
-        if (arr.size() == 0) arr.add(true);
-        return;
-      }
-      const bool nextIndex = segIsIndex(segs[i + 1]);
-      if (arr.size() == 0) {
-        if (nextIndex)
-          arr.add<JsonArray>();
-        else
-          arr.add<JsonObject>();
-      }
-      node = arr[0];
-    } else {
-      JsonObject obj = node.is<JsonObject>() ? node.as<JsonObject>() : node.to<JsonObject>();
-      if (last) {
-        obj[segs[i]] = true;
-        return;
-      }
-      const bool nextIndex = segIsIndex(segs[i + 1]);
-      JsonVariant child = obj[segs[i]];
-      if (child.isNull()) {
-        if (nextIndex)
-          child = obj[segs[i]].to<JsonArray>();
-        else
-          child = obj[segs[i]].to<JsonObject>();
-      }
-      node = child;
-    }
-  }
-}
-
-void addFieldFilter(JsonDocument& filter, const std::string& itemsPath, const std::string& fieldPath) {
-  if (fieldPath.empty()) return;
-  std::vector<std::string> segs;
-  splitPath(itemsPath, segs);
-  segs.push_back("0");  // the item array: index filter applies to all elements
-  std::vector<std::string> fieldSegs;
-  splitPath(fieldPath, fieldSegs);
-  segs.insert(segs.end(), fieldSegs.begin(), fieldSegs.end());
-  addFilterPath(filter, segs);
-}
 
 std::string md5Hex(const std::string& text) {
   MD5Builder md5;
@@ -142,210 +82,22 @@ void emitBookDownloaded(const std::string& manifestPath, const std::string& path
   pluginevents::emit(pluginevents::Event::BookDownloaded, vars, 3);
 }
 
-// --- XML-list helpers -----------------------------------------------------
-std::string urlDecode(const std::string& s) {
-  std::string plusesAsSpaces = s;
-  std::replace(plusesAsSpaces.begin(), plusesAsSpaces.end(), '+', ' ');
-  return FsHelpers::decodeUriEscapes(plusesAsSpaces);
+// Streams the browse temp file through a catalog list parser (null on OOM).
+// False when the reader cannot start or the document is malformed.
+template <typename Parser>
+bool streamBrowseFile(Parser* parser) {
+  HalFile file;
+  if (!parser || !Storage.openFileForRead("PCAT", BROWSE_TMP_PATH, file)) {
+    LOG_ERR("PCAT", "Catalog list reader unavailable");
+    return false;
+  }
+  if (parser->parse([](void* f, char* buf, size_t len) { return static_cast<HalFile*>(f)->read(buf, len); }, &file)) {
+    return true;
+  }
+  LOG_ERR("PCAT", "Catalog list parse error");
+  return false;
 }
 
-std::string urlEncodePath(const std::string& s) {
-  std::string out;
-  out.reserve(s.size() * 2);
-  for (const unsigned char c : s) {
-    if (isalnum(c) || strchr("-_.~/", c)) {
-      out += static_cast<char>(c);
-    } else {
-      char buf[4];
-      snprintf(buf, sizeof(buf), "%%%02X", c);
-      out += buf;
-    }
-  }
-  return out;
-}
-
-std::string pathOf(const std::string& url) {
-  const size_t schemeEnd = url.find("://");
-  if (schemeEnd == std::string::npos) return url;
-  const size_t hostEnd = url.find('/', schemeEnd + 3);
-  return hostEnd == std::string::npos ? "/" : url.substr(hostEnd);
-}
-
-std::string basename(const std::string& path) {
-  std::string p = path;
-  while (!p.empty() && p.back() == '/') p.pop_back();
-  const size_t slash = p.rfind('/');
-  return slash == std::string::npos ? p : p.substr(slash + 1);
-}
-
-// True when `path` ends in one of the allowed extensions (case-insensitive).
-// An empty list allows everything.
-bool hasAllowedExtension(const std::string& path, const std::vector<std::string>& exts) {
-  if (exts.empty()) return true;
-  std::string trimmed = path;
-  while (!trimmed.empty() && trimmed.back() == '/') trimmed.pop_back();
-  return std::any_of(exts.begin(), exts.end(),
-                     [&](const std::string& ext) { return FsHelpers::checkFileExtension(trimmed, ext.c_str()); });
-}
-
-// Streams rows matched by local element name. Selectors: "elem" (leading
-// descendant text), "elem@attr" (descendant attribute), "@attr" (item attribute).
-class XmlListParser {
- public:
-  static constexpr size_t MAX_ITEMS = 200;
-  enum Field { F_URL, F_TITLE, F_AUTHOR, F_ID, F_COUNT };
-  struct RawItem {
-    std::string field[F_COUNT];
-    bool isDir = false;
-  };
-
-  using ItemSink = void (*)(void*, RawItem&);
-  XmlListParser(const std::string& itemName, const std::string& containerName,
-                const std::string* const (&selectors)[F_COUNT], ItemSink sink, void* context)
-      : item(itemName), container(containerName), sink(sink), context(context) {
-    for (int i = 0; i < F_COUNT; i++) splitSelector(*selectors[i], sel[i]);
-  }
-
-  // Emit completed rows immediately; a parse error keeps earlier rows.
-  void parseFile(HalFile& f) {
-    XML_Parser p = XML_ParserCreate(nullptr);
-    if (!p) {
-      LOG_ERR("PCAT", "OOM: XML list parser");
-      return;
-    }
-    XML_SetUserData(p, this);
-    XML_SetElementHandler(
-        p,
-        [](void* self, const XML_Char* name, const XML_Char** atts) {
-          static_cast<XmlListParser*>(self)->onStart(name, atts);
-        },
-        [](void* self, const XML_Char* name) { static_cast<XmlListParser*>(self)->onEnd(name); });
-    XML_SetCharacterDataHandler(
-        p, [](void* self, const XML_Char* s, int len) { static_cast<XmlListParser*>(self)->onText(s, len); });
-    for (;;) {
-      const int n = f.read(buf, sizeof(buf));
-      const bool last = n <= 0;
-      if (XML_Parse(p, buf, last ? 0 : n, last ? XML_TRUE : XML_FALSE) != XML_STATUS_OK) {
-        LOG_ERR("PCAT", "XML parse error at line %lu: %s", XML_GetCurrentLineNumber(p),
-                XML_ErrorString(XML_GetErrorCode(p)));
-        break;
-      }
-      if (last) break;
-    }
-    destroyXmlParser(p);
-  }
-
- private:
-  static constexpr size_t MAX_FIELD_CHARS = 768;
-
-  struct Selector {
-    std::string elem, attr;
-    bool onItemTag = false;  // "@attr": read from the item element's own tag
-    bool isSet() const { return !elem.empty() || !attr.empty(); }
-  };
-
-  static void splitSelector(const std::string& s, Selector& out) {
-    if (s.empty()) return;
-    if (s[0] == '@') {
-      out.onItemTag = true;
-      out.attr = s.substr(1);
-      return;
-    }
-    const size_t at = s.find('@');
-    out.elem = at == std::string::npos ? s : s.substr(0, at);
-    if (at != std::string::npos) out.attr = s.substr(at + 1);
-  }
-
-  static const char* localName(const XML_Char* name) {
-    const char* colon = strrchr(name, ':');
-    return colon ? colon + 1 : name;
-  }
-
-  static const char* findAttr(const XML_Char** atts, const std::string& attr) {
-    for (int i = 0; atts[i]; i += 2) {
-      if (attr == atts[i]) return atts[i + 1];
-    }
-    return nullptr;
-  }
-
-  void onStart(const XML_Char* name, const XML_Char** atts) {
-    depth++;
-    const char* local = localName(name);
-    if (itemDepth < 0) {
-      if (parsedItems < MAX_ITEMS && item == local) {
-        itemDepth = depth;
-        current = RawItem{};
-        capturingMask = 0;
-        for (int i = 0; i < F_COUNT; i++) {
-          done[i] = !sel[i].isSet();
-          if (sel[i].onItemTag) {
-            const char* v = findAttr(atts, sel[i].attr);
-            if (v) current.field[i] = v;
-            done[i] = true;
-          }
-        }
-      }
-      return;
-    }
-    // Inside an item: a child element ends any leading-text capture.
-    capturingMask = 0;
-    if (!container.empty() && container == local) current.isDir = true;
-    for (int i = 0; i < F_COUNT; i++) {
-      if (done[i] || sel[i].onItemTag || sel[i].elem != local) continue;
-      done[i] = true;  // first matching descendant wins
-      if (!sel[i].attr.empty()) {
-        const char* v = findAttr(atts, sel[i].attr);
-        if (v) current.field[i] = v;
-      } else {
-        capturingMask |= 1u << i;
-      }
-    }
-  }
-
-  void onEnd(const XML_Char* name) {
-    if (itemDepth >= 0) {
-      capturingMask = 0;
-      if (depth == itemDepth && item == localName(name)) {
-        for (auto& f : current.field) trim(f);
-        ++parsedItems;
-        sink(context, current);
-        itemDepth = -1;
-      }
-    }
-    depth--;
-  }
-
-  void onText(const XML_Char* s, const int len) {
-    if (itemDepth < 0 || capturingMask == 0) return;
-    for (int i = 0; i < F_COUNT; i++) {
-      if (!(capturingMask & (1u << i)) || current.field[i].size() >= MAX_FIELD_CHARS) continue;
-      current.field[i].append(s, std::min<size_t>(len, MAX_FIELD_CHARS - current.field[i].size()));
-    }
-  }
-
-  static void trim(std::string& s) {
-    const size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) {
-      s.clear();
-      return;
-    }
-    const size_t e = s.find_last_not_of(" \t\r\n");
-    s = s.substr(b, e - b + 1);
-  }
-
-  std::string item;
-  std::string container;
-  Selector sel[F_COUNT];
-  char buf[2048] = {};  // The parser and its read buffer share one heap allocation.
-  ItemSink sink;
-  void* context;
-  size_t parsedItems = 0;
-  RawItem current;
-  bool done[F_COUNT] = {};
-  uint8_t capturingMask = 0;
-  int depth = 0;
-  int itemDepth = -1;
-};
 }  // namespace
 
 namespace {
@@ -447,8 +199,6 @@ bool PluginCatalogActivity::loadManifest() {
   JsonVariantConst dl = doc["download"];
   pluginhttp::readRequest(dl, "GET", manifest.downloadReq);
   manifest.dlUrlPath = dl["url_path"] | "";
-  manifest.dlUser = dl["username"] | "";
-  manifest.dlPass = dl["password"] | "";
   manifest.destDir = dl["dest_dir"] | "";
   manifest.filenameTpl = dl["filename"] | "{title}.epub";
   // Multi-file bundle install (generic): base URL + a files array per item.
@@ -545,18 +295,11 @@ void PluginCatalogActivity::enterPluginPicker() {
   catalogTitle = tr(STR_PLUGINS);
   token.clear();
   config.clear();
-  items.clear();
-  page = 1;
-  hasMore = false;
-  currentList = -1;
-  searchActive = false;
-  searchQuery.clear();
+  resetBrowse();
   browseHistory.clear();
   browseCurrentUrl.clear();
   errorMessage.clear();
   session.reset();  // no TLS while only picking
-  releaseRows();
-  nav.reset();
   state = State::PLUGIN_PICKER;
   if (pickerReturnRow > 0 && pickerReturnRow < rowCount()) moveSelectionTo(pickerReturnRow);
   requestUpdate();
@@ -564,14 +307,7 @@ void PluginCatalogActivity::enterPluginPicker() {
 
 void PluginCatalogActivity::enterCatalog() {
   state = State::CHECK_WIFI;
-  items.clear();
-  releaseRows();
-  nav.reset();
-  page = 1;
-  hasMore = false;
-  currentList = -1;
-  searchActive = false;
-  searchQuery.clear();
+  resetBrowse();
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
   session.reset(new (std::nothrow) freeink::SecureHttpClient());
@@ -590,6 +326,21 @@ void PluginCatalogActivity::enterCatalog() {
 // pick connects instantly; onExit tears it down when the activity ends.
 void PluginCatalogActivity::exitCatalog() { enterPluginPicker(); }
 
+void PluginCatalogActivity::resetBrowse() {
+  items.clear();
+  page = 1;
+  hasMore = false;
+  currentList = -1;
+  searchActive = false;
+  searchQuery.clear();
+  releaseRows();
+  nav.reset();
+}
+
+bool PluginCatalogActivity::wantsListPicker() const {
+  return !manifest.browseLists.empty() && !manifest.isXmlList() && currentList < 0;
+}
+
 void PluginCatalogActivity::onExit() {
   items.clear();
   session.reset();  // drop browse TLS before Wi-Fi teardown
@@ -599,7 +350,7 @@ void PluginCatalogActivity::onExit() {
 
 void PluginCatalogActivity::startBrowse() {
   // Browse lists apply to JSON catalogs; XML lists navigate by folder instead.
-  if (!manifest.browseLists.empty() && !manifest.isXmlList() && currentList < 0) {
+  if (wantsListPicker()) {
     // Same auth gate as fetchPage: without it a signed-out user is shown the
     // list picker and only hits the sign-in screen after picking a list.
     // loadToken() returns true for token-less catalogs, which skip the gate.
@@ -625,10 +376,6 @@ void PluginCatalogActivity::startBrowse() {
   beginLoading();
   fetchPage(1);
 }
-
-// Shared progress callback for single-file and bundle downloads: updates the
-// byte counter, pumps input for cancel, and throttles repaints to visible
-// percent steps.
 
 void PluginCatalogActivity::performSearch(const std::string& query) {
   if (query.empty()) {
@@ -695,30 +442,15 @@ bool PluginCatalogActivity::fetchBrowseResponse() {
 }
 
 bool PluginCatalogActivity::parseXmlList() {
-  const std::string origin = UrlUtils::extractHost(browseCurrentUrl);
-  const std::string selfPath = pathOf(browseCurrentUrl);
-  auto trimSlash = [](std::string s) {
-    while (s.size() > 1 && s.back() == '/') s.pop_back();
-    return s;
-  };
-  const std::string decodedSelf = trimSlash(urlDecode(selfPath));
-
   releaseRows();
   items.clear();
   auto append = [&](XmlListParser::RawItem& row) {
-    std::string& rawUrl = row.field[XmlListParser::F_URL];
-    if (rawUrl.empty()) return;
-    const std::string decodedUrl = urlDecode(rawUrl);
-    if (manifest.xmlSkipSelf && trimSlash(decodedUrl) == decodedSelf) return;
-    if (!row.isDir && !hasAllowedExtension(decodedUrl, manifest.xmlExtensions)) return;
     Item item;
     item.isDir = row.isDir;
-    item.url = manifest.xmlResolveUrls && rawUrl.rfind("http", 0) != 0 ? origin + urlEncodePath(decodedUrl)
-                                                                       : std::move(rawUrl);
+    item.url = std::move(row.field[XmlListParser::F_URL]);
+    item.title = std::move(row.field[XmlListParser::F_TITLE]);
     item.author = std::move(row.field[XmlListParser::F_AUTHOR]);
     item.id = std::move(row.field[XmlListParser::F_ID]);
-    std::string& title = row.field[XmlListParser::F_TITLE];
-    item.title = title.empty() ? basename(decodedUrl) : std::move(title);
     if (items.size() == items.capacity()) {
       items.reserve(std::min(XmlListParser::MAX_ITEMS, std::max<size_t>(manifest.pageSize, items.capacity() * 2)));
     }
@@ -726,21 +458,20 @@ bool PluginCatalogActivity::parseXmlList() {
   };
   const std::string* const selectors[] = {&manifest.urlPath, &manifest.titlePath, &manifest.authorPath,
                                           &manifest.idPath};
-  {
-    auto parser = makeUniqueNoThrow<XmlListParser>(
-        manifest.xmlItem, manifest.xmlContainer, selectors,
-        [](void* context, XmlListParser::RawItem& row) { (*static_cast<decltype(append)*>(context))(row); }, &append);
-    HalFile file;
-    if (!parser) {
-      LOG_ERR("PCAT", "OOM: XML list reader");
-      fail(StrId::STR_PARSE_FEED_FAILED);
-      return false;
-    } else if (Storage.openFileForRead("PCAT", BROWSE_TMP_PATH, file)) {
-      parser->parseFile(file);
-    } else {
-      fail(StrId::STR_PARSE_FEED_FAILED);
-      return false;
-    }
+  auto parser = makeUniqueNoThrow<XmlListParser>(
+      manifest.xmlItem, manifest.xmlContainer, selectors,
+      [](void* context, XmlListParser::RawItem& row) { (*static_cast<decltype(append)*>(context))(row); }, &append);
+  if (parser) {
+    XmlListParser::UrlOptions urls;
+    urls.requestUrl = browseCurrentUrl;
+    urls.skipSelf = manifest.xmlSkipSelf;
+    urls.resolveUrls = manifest.xmlResolveUrls;
+    urls.extensions = manifest.xmlExtensions;
+    parser->setUrlOptions(std::move(urls));
+  }
+  if (!streamBrowseFile(parser.get())) {
+    fail(StrId::STR_PARSE_FEED_FAILED);
+    return false;
   }
 
   // Folders first, then files, each alphabetical — matches how file managers list.
@@ -791,66 +522,32 @@ void PluginCatalogActivity::fetchPage(const int newPage) {
 bool PluginCatalogActivity::parseBrowseResponse() {
   if (manifest.isXmlList()) return parseXmlList();
 
-  JsonDocument filter;
-  addFieldFilter(filter, manifest.itemsPath, manifest.titlePath);
-  addFieldFilter(filter, manifest.itemsPath, manifest.authorPath);
-  addFieldFilter(filter, manifest.itemsPath, manifest.idPath);
-  addFieldFilter(filter, manifest.itemsPath, manifest.urlPath);
-  addFieldFilter(filter, manifest.itemsPath, manifest.versionPath);
-  addFieldFilter(filter, manifest.itemsPath, manifest.bundleBasePath);
-  addFieldFilter(filter, manifest.itemsPath, manifest.bundleFilesPath);
-
-  // Filtered parse straight from the SD temp file — the raw response never
-  // occupies DRAM, only the few fields the filter admits.
-  JsonDocument doc;
-  {
-    HalFile file;
-    if (!Storage.openFileForRead("PCAT", BROWSE_TMP_PATH, file)) {
-      fail(StrId::STR_PARSE_FEED_FAILED);
-      return false;
-    }
-    struct HalFileReader {
-      HalFile& f;
-      int read() { return f.read(); }
-      size_t readBytes(char* buf, size_t n) {
-        const int r = f.read(buf, n);
-        return r < 0 ? 0 : static_cast<size_t>(r);
-      }
-    } reader{file};
-    const auto parseErr = deserializeJson(doc, reader, DeserializationOption::Filter(filter));
-    if (parseErr != DeserializationError::Ok) {
-      LOG_ERR("PCAT", "browse JSON parse error: %s", parseErr.c_str());
-      fail(StrId::STR_PARSE_FEED_FAILED);
-      return false;
-    }
-  }
-
-  JsonVariantConst itemsNode = resolvePath(doc.as<JsonVariantConst>(), manifest.itemsPath);
-  JsonArrayConst arr = itemsNode.as<JsonArrayConst>();
   releaseRows();
   items.clear();
-  if (!arr.isNull()) {
-    items.reserve(manifest.pageSize + 1);
-    for (JsonVariantConst v : arr) {
-      if (static_cast<int>(items.size()) >= manifest.pageSize + 1) break;
-      Item item;
-      item.title = variantToString(resolvePath(v, manifest.titlePath));
-      item.author = variantToString(resolvePath(v, manifest.authorPath));
-      item.id = variantToString(resolvePath(v, manifest.idPath));
-      item.url = variantToString(resolvePath(v, manifest.urlPath));
-      if (manifest.tracksInstalls()) item.version = variantToString(resolvePath(v, manifest.versionPath));
-      if (manifest.isBundle()) {
-        item.base = variantToString(resolvePath(v, manifest.bundleBasePath));
-        JsonArrayConst fileArr = resolvePath(v, manifest.bundleFilesPath).as<JsonArrayConst>();
-        if (!fileArr.isNull()) {
-          item.files.reserve(fileArr.size());
-          for (JsonVariantConst f : fileArr) {
-            if (f.is<const char*>()) item.files.emplace_back(f.as<const char*>());
-          }
-        }
-      }
-      if (!item.title.empty()) items.push_back(std::move(item));
-    }
+  items.reserve(manifest.pageSize + 1);
+  // One extra row reveals whether a next page exists.
+  auto append = [&](JsonListParser::Row& row) {
+    if (row.field[JsonListParser::F_TITLE].empty() || static_cast<int>(items.size()) > manifest.pageSize) return;
+    Item item;
+    item.title = std::move(row.field[JsonListParser::F_TITLE]);
+    item.author = std::move(row.field[JsonListParser::F_AUTHOR]);
+    item.id = std::move(row.field[JsonListParser::F_ID]);
+    item.url = std::move(row.field[JsonListParser::F_URL]);
+    item.version = std::move(row.field[JsonListParser::F_VERSION]);
+    item.base = std::move(row.field[JsonListParser::F_BASE]);
+    item.files = std::move(row.files);
+    items.push_back(std::move(item));
+  };
+  // Streamed straight from the SD temp file: neither the raw response nor a
+  // parsed document occupies DRAM, only the rows kept.
+  const std::string* const fields[] = {&manifest.titlePath, &manifest.authorPath,  &manifest.idPath,
+                                       &manifest.urlPath,   &manifest.versionPath, &manifest.bundleBasePath};
+  auto parser = makeUniqueNoThrow<JsonListParser>(
+      manifest.itemsPath, fields, manifest.bundleFilesPath,
+      [](void* context, JsonListParser::Row& row) { (*static_cast<decltype(append)*>(context))(row); }, &append);
+  if (!streamBrowseFile(parser.get())) {
+    fail(StrId::STR_PARSE_FEED_FAILED);
+    return false;
   }
   hasMore = static_cast<int>(items.size()) > manifest.pageSize;
   if (hasMore) items.resize(manifest.pageSize);
@@ -957,8 +654,6 @@ void PluginCatalogActivity::pollAuth() {
 void PluginCatalogActivity::downloadItem(const int itemIndex) {
   // Own only the selected item's metadata while TLS needs the catalog's heap.
   Item item;
-  LOG_DBG("PCAT", "Download preparation: %u items, heap %u, max block %u", (unsigned)items.size(),
-          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   {
     RenderLock lock;
     item = std::move(items[itemIndex]);
@@ -968,8 +663,6 @@ void PluginCatalogActivity::downloadItem(const int itemIndex) {
     std::vector<Item>().swap(items);
   }
   requestUpdateAndWait();
-  LOG_DBG("PCAT", "Catalog released for download: heap %u, max block %u", (unsigned)ESP.getFreeHeap(),
-          (unsigned)ESP.getMaxAllocHeap());
   const auto result = manifest.isBundle() && !item.files.empty() ? downloadBundle(item) : downloadBook(item);
   session.reset();
   item = {};
@@ -1083,15 +776,13 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBook(const Item& it
   dest += '/';
   dest += filename;
 
-  const std::string dlUser = substituted(manifest.dlUser, &item);
-  const std::string dlPass = substituted(manifest.dlPass, &item);
   // url_path already authenticated the JSON hop; the resolved file URL must not
   // inherit those headers (S3 pre-signed GETs reject a second Authorization).
   const std::vector<HttpDownloader::Header> fileHeaders = manifest.dlUrlPath.empty()
                                                               ? substitutedHeaders(manifest.downloadReq.headers, &item)
                                                               : std::vector<HttpDownloader::Header>{};
   session.reset();  // free browse TLS before the large file GET
-  const auto result = downloadFile(fileUrl, dest, dlUser, dlPass, fileHeaders);
+  const auto result = downloadFile(fileUrl, dest, {}, {}, fileHeaders);
   if (result != HttpDownloader::OK) return result;
   clearBookCache(dest);
 
@@ -1113,18 +804,8 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBook(const Item& it
       std::string body = substituted(manifest.sidecarBody, &item);
       substituteAll(body, "{md5}", md5);
       substituteAll(body, "{dest}", dest);
-      HalFile sidecar;
-      if (Storage.openFileForWrite("PCAT", path, sidecar)) {
-        if (sidecar.write(body.data(), body.size()) != body.size()) {
-          LOG_ERR("PCAT", "short sidecar write: %s", path.c_str());
-          if (sidecar.isOpen()) sidecar.close();
-          Storage.remove(path.c_str());
-        } else {
-          sidecar.flush();
-        }
-      } else {
+      if (!Storage.writeFile(path.c_str(), String(body.c_str())))
         LOG_ERR("PCAT", "Sidecar write failed: %s", path.c_str());
-      }
     }
   }
 
@@ -1179,7 +860,7 @@ bool PluginCatalogActivity::handleCustomInput() {
 void PluginCatalogActivity::retryBrowse() {
   if (state == State::NO_TOKEN && manifest.hasDeviceCode()) {
     beginAuth();
-  } else if (!manifest.browseLists.empty() && !manifest.isXmlList() && currentList < 0) {
+  } else if (wantsListPicker()) {
     startBrowse();
   } else {
     beginLoading();
@@ -1283,6 +964,11 @@ void PluginCatalogActivity::activateItem(const int itemIndex) {
 }
 
 void PluginCatalogActivity::drawFooter() {
+  // The QR is a raw-renderer overlay (FreeInkUI has no QR component); the base
+  // render() calls drawFooter() after the app has painted.
+  if (state == State::AUTH && authQrRect.width > 0) {
+    QrUtils::drawQrCode(renderer, Rect{authQrRect.x, authQrRect.y, authQrRect.width, authQrRect.height}, authVerifyUrl);
+  }
   MappedInputManager::Labels labels;
   switch (state) {
     case State::BROWSING:
@@ -1294,17 +980,6 @@ void PluginCatalogActivity::drawFooter() {
       const char* confirmLabel;
       if (state != State::BROWSING) {
         confirmLabel = count > 0 ? tr(STR_OPEN) : "";
-        // A selected web-only plugin row has nothing to open.
-        if (state == State::PLUGIN_PICKER && nav.selected >= 0 && nav.selected < count) {
-          const int pi = nav.selected - (showOpds ? 1 : 0);
-          if (pi >= 0 && pi < static_cast<int>(installedPlugins.size())) {
-            const auto& plugin = installedPlugins[pi];
-            if (PluginLocations::pickerAction(plugin.deviceKind, !plugin.readmePath.empty()) ==
-                PluginLocations::PickerAction::None) {
-              confirmLabel = "";
-            }
-          }
-        }
       } else {
         // Folders open; items and the pager rows both fetch from the server.
         const bool onDir =
@@ -1363,7 +1038,7 @@ void PluginCatalogActivity::buildScreen(UiScreen& screen) {
 }
 
 // Device-code sign-in: verification URL (text + QR) and the user code. The QR
-// bitmap itself is painted by render() into the rect measured here.
+// bitmap itself is painted by drawFooter() into the rect measured here.
 void PluginCatalogActivity::buildAuthScreen(UiScreen& screen) {
   fui::TextStyle centered = screen.theme().bodyText;
   centered.align = fui::TextAlign::Center;
@@ -1446,14 +1121,9 @@ void PluginCatalogActivity::rebuildRowItems() {
   if (state == State::PLUGIN_PICKER) {
     if (showOpds) addRow(tr(STR_OPDS_BROWSER), tr(STR_OPDS_SERVERS));
     for (const auto& plugin : installedPlugins) {
-      // Three-way classification from PluginLocations::classifyDeviceManifest(),
-      // expressed through upstream's addRow lambda. Upstream's
-      // `manifestPath.empty()` test only distinguishes web-only from catalog and
-      // predates events-only device manifests, which this change adds:
       //   None       -> listed but inert, web-only hint, no chevron
       //   Catalog    -> browsable, own description, chevron
-      //   Background -> events-only, own description, chevron ONLY with a readme
-      // tests/plugin_manifest_classification covers all three.
+      //   Background -> events-only, own description, chevron only with a readme
       const char* subtitle = plugin.description.empty() ? nullptr : plugin.description.c_str();
       switch (plugin.deviceKind) {
         case PluginLocations::DeviceKind::None:
@@ -1483,25 +1153,4 @@ void PluginCatalogActivity::releaseRows() {
   // rows; stop routing touches against it until the next render.
   closeRouting();
   rowsDirty = true;
-}
-
-void PluginCatalogActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-  renderUi();
-  // Same layout-feedback passes as UiListActivity::render(), which this
-  // override otherwise bypasses: subtitle rows wrap, so fewer rows fit than
-  // the fixed-height estimate and the nav advances the viewport after layout
-  // (ListNav::onListRendered). Without the rebuild the selection can sit on
-  // a clipped trailing row, drawn without focus and unreachable by touch.
-  for (int pass = 0; activeNav().consumeRebuildNeeded() && pass < 8; ++pass) {
-    renderer.clearScreen();
-    renderUi();
-  }
-  // The QR is a raw-renderer overlay: FreeInkUI has no QR component, and
-  // QrUtils draws straight into the framebuffer the app just painted.
-  if (state == State::AUTH && authQrRect.width > 0) {
-    QrUtils::drawQrCode(renderer, Rect{authQrRect.x, authQrRect.y, authQrRect.width, authQrRect.height}, authVerifyUrl);
-  }
-  drawFooter();
-  renderer.displayBuffer();
 }

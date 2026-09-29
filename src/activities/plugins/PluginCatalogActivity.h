@@ -44,7 +44,6 @@ class PluginCatalogActivity final : public CatalogActivity {
 
   void onEnter() override;
   void onExit() override;
-  void render(RenderLock&&) override;
 
  private:
   struct Manifest {
@@ -81,8 +80,6 @@ class PluginCatalogActivity final : public CatalogActivity {
     // Empty dlUrlPath means a direct URL; otherwise resolve it through an API hop.
     pluginhttp::RequestSpec downloadReq;
     std::string dlUrlPath;
-    // Optional HTTP Basic credentials for the file GET; templates.
-    std::string dlUser, dlPass;
     std::string destDir, filenameTpl;
     // Bundle item fields: base URL and relative paths, installed under destDir/subdir.
     std::string bundleBasePath, bundleFilesPath, bundleSubdir;
@@ -140,12 +137,16 @@ class PluginCatalogActivity final : public CatalogActivity {
   unsigned long authNextPollMs = 0;
   unsigned long authDeadlineMs = 0;
   // QR placement measured by buildScreen (AUTH state); drawn as a raw-renderer
-  // overlay in render() after the app has painted.
+  // overlay in drawFooter() after the app has painted.
   freeink::ui::Rect authQrRect{};
 
   void enterPluginPicker();
   void enterCatalog();
   void exitCatalog();
+  // Clear items, paging, list and search state, and the row buffer.
+  void resetBrowse();
+  // JSON catalog with named lists and none picked yet.
+  bool wantsListPicker() const;
   bool loadManifest();
   bool loadToken();
   void loadConfig();

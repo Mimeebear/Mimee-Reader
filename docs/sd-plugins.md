@@ -192,8 +192,6 @@ Two browse formats:
     "body": "{}",
     "url_path": "url",                      // response field with the file URL;
                                             // omit to treat "url" itself as the file URL
-    "username": "{cfg.user}",              // optional HTTP Basic creds for the file GET
-    "password": "{cfg.pass}",             // omit for token/header auth
     "dest_dir": "/ServiceName",             // created if missing; falls back to SD root
     "filename": "{title}.epub",             // rendered filename is sanitized to 100 bytes;
                                             // a conventional extension is preserved

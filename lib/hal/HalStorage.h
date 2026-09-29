@@ -59,6 +59,8 @@ class HalStorage {
   bool exists(const char* path);
   bool remove(const char* path);
   bool rename(const char* oldPath, const char* newPath);
+  // Move a fully written temp file over `path`, replacing any existing file.
+  bool replaceFile(const char* tmpPath, const char* path);
   bool rmdir(const char* path);
 
   bool openFileForRead(const char* moduleName, const char* path, HalFile& file);

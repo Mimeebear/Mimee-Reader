@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <WString.h>
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -76,8 +77,11 @@ void loadConfigFile(const std::string& file, Headers& out);
 
 // Collects one checked DRAM buffer, capped at maxResponse. Returns HTTP status
 // (including OAuth polling's 4xx bodies), or -1 on OOM, truncation, or transport failure.
+// responseHeaders (optional) receives the response headers in receive order,
+// duplicates kept. shouldAbort (optional) is polled in every wait loop.
 int request(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,
-            const std::string& body, const Headers& headers, String& out, size_t maxResponse);
+            const std::string& body, const Headers& headers, String& out, size_t maxResponse,
+            Headers* responseHeaders = nullptr, const std::function<bool()>& shouldAbort = nullptr);
 
 // Same request, body streamed to a file on SD instead of DRAM.
 int requestToFile(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,

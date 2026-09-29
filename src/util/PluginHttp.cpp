@@ -164,7 +164,8 @@ void loadConfigFile(const std::string& file, Headers& out) {
 }
 
 int request(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,
-            const std::string& body, const Headers& headers, String& out, const size_t maxResponse) {
+            const std::string& body, const Headers& headers, String& out, const size_t maxResponse,
+            Headers* responseHeaders, const std::function<bool()>& shouldAbort) {
   WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient tmp;
   freeink::SecureHttpClient* httpPtr = openClient(session, tmp, url, headers);
@@ -175,7 +176,8 @@ int request(freeink::SecureHttpClient* session, const std::string& url, const st
   size_t reserved = 0;
   bool overflow = false;
   const int status = http.sendRequest(
-      method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(), [&](const uint8_t* data, size_t len) {
+      method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
+      [&](const uint8_t* data, size_t len) {
         if (len > maxResponse - out.length()) {
           overflow = true;
           return false;
@@ -188,7 +190,9 @@ int request(freeink::SecureHttpClient* session, const std::string& url, const st
           return false;
         }
         return true;
-      });
+      },
+      shouldAbort);
+  if (responseHeaders) *responseHeaders = http.getHeaders();
   // Error statuses still return their body: OAuth device-code polling carries
   // its state ("authorization_pending") in 4xx response bodies.
   if (overflow || status < 0 || !http.responseComplete()) {

@@ -68,8 +68,17 @@
     // Device capabilities a page can't do itself. relay() resolves to
     // { status, body, headers }, where headers is an ordered list of
     // [name, value] pairs (duplicates preserved, so every Set-Cookie shows up).
-    relay(plugin, method, url, headers, body) {
-      return this._post('/api/relay', { plugin, method, url, headers: headers || {}, body: body || '' });
+    async relay(plugin, method, url, headers, body) {
+      const r = await fetch('/api/relay', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin, method, url, headers: headers || {}, body: body || '' })
+      });
+      if (!r.ok) return this._readResponse(r, '/api/relay');  // throws with the device's error
+      // The device sends the upstream body raw. Header values arrive as Latin-1
+      // code units, so re-decode the UTF-8 header JSON.
+      const raw = r.headers.get('X-Relay-Headers') || '[]';
+      const list = JSON.parse(new TextDecoder().decode(Uint8Array.from(raw, (c) => c.charCodeAt(0))));
+      return { status: Number(r.headers.get('X-Relay-Status')), headers: list, body: await r.text() };
     },
     crypto(op, fields) { return this._post('/api/crypto', Object.assign({ op }, fields || {})); },
     async writeFile(plugin, path, dataB64) {

@@ -10,6 +10,7 @@
 #include <LibraryBuilder.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <ResumableFetch.h>
 #include <SecureHttpClient.h>
 #include <Util.h>
 #include <WiFi.h>
@@ -37,6 +38,7 @@
 #include "html/SettingsPageHtml.generated.h"
 #include "html/js/jszip_minJs.generated.h"
 #include "util/BookCacheUtils.h"
+#include "util/PluginHttp.h"
 #include "util/PluginLocations.h"
 #include "util/TaskWatchdog.h"
 
@@ -755,6 +757,15 @@ static bool flushUploadBuffer(CrossPointWebServer::UploadState& state) {
   return true;
 }
 
+// Drop a partially written upload so a truncated book never lands in the library.
+// The file is new: uploads refuse to overwrite an existing name.
+static void removeUploadedFile(const CrossPointWebServer::UploadState& state) {
+  String filePath = state.path;
+  if (!filePath.endsWith("/")) filePath += "/";
+  filePath += state.fileName;
+  Storage.remove(filePath.c_str());
+}
+
 void CrossPointWebServer::handleUpload(UploadState& state) const {
   static size_t lastLoggedSize = 0;
 
@@ -855,6 +866,7 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
             state.error = "Failed to write to SD card - disk may be full";
             state.file.close();
             state.buffer.reset();
+            removeUploadedFile(state);
             return;
           }
         }
@@ -878,6 +890,7 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
         state.error = "Failed to write final data to SD card";
       }
       state.file.close();
+      if (!state.error.isEmpty()) removeUploadedFile(state);
 
       if (state.error.isEmpty()) {
         state.success = true;
@@ -903,11 +916,7 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
     state.buffer.reset();
     if (state.file) {
       state.file.close();
-      // Try to delete the incomplete file
-      String filePath = state.path;
-      if (!filePath.endsWith("/")) filePath += "/";
-      filePath += state.fileName;
-      Storage.remove(filePath.c_str());
+      removeUploadedFile(state);
     }
     state.error = "Upload aborted";
     LOG_DBG("WEB", "Upload aborted");
@@ -1810,9 +1819,12 @@ void CrossPointWebServer::handlePluginFile() const {
   f.close();
 }
 
-// POST /api/relay {plugin, method, url, headers:{}, body} -> {status, body}
+// POST /api/relay {plugin, method, url, headers:{}, body}
+//   -> 200 with the upstream body raw, its status in X-Relay-Status and its
+//      headers in X-Relay-Headers ([[name, value], ...] JSON, duplicates kept)
 // Lets a plugin make an outbound HTTP(S) call the browser can't (CORS): the
-// device makes it via SecureNet.
+// device makes it via SecureNet. Sending the body raw avoids escaping it into
+// JSON on the device; PluginHost.relay() rebuilds {status, headers, body}.
 void CrossPointWebServer::handleRelay() {
   JsonDocument req;
   if (!readJsonBody(req)) return;
@@ -1823,28 +1835,8 @@ void CrossPointWebServer::handleRelay() {
     server->send(400, "application/json", "{\"error\":\"missing plugin/url\"}");
     return;
   }
-
-  // Declare the resume guard before the TLS client so reverse destruction
-  // releases every client/response allocation before rebuilding these services.
-  suspendTransferServices();
-  ScopedCleanup resumeServices{[this] { resumeTransferServices(); }};
-  WifiPowerSaveGuard psGuard;
-  freeink::SecureHttpClient http;
-  http.setUserAgent("CrossPoint");
-  // The SecureNet transport ships no CA bundle, so peer verification always
-  // fails (wolfSSL -188); skip it like HttpDownloader does.
-
-  http.setInsecure();
-  if (!http.begin(url)) {
-    server->send(502, "application/json", "{\"error\":\"begin failed\"}");
-    return;
-  }
-  if (req["headers"].is<JsonObject>()) {
-    for (JsonPair kv : req["headers"].as<JsonObject>()) {
-      const char* v = kv.value().as<const char*>();
-      http.addHeader(kv.key().c_str(), v ? v : "");
-    }
-  }
+  pluginhttp::Headers headers;
+  pluginhttp::readHeaders(req["headers"], headers);
   const std::string body = req["body"] | "";
   // All values needed below now have independent storage. Drop both copies of
   // the inbound JSON before wolfSSL allocates its handshake working set.
@@ -1852,153 +1844,41 @@ void CrossPointWebServer::handleRelay() {
   req.shrinkToFit();
   releaseRequestArguments(server.get());
 
+  suspendTransferServices();
+  ScopedCleanup resumeServices{[this] { resumeTransferServices(); }};
   LOG_DBG("WEB", "Relay TLS start: heap %u, max block %u: %s", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap(), url.c_str());
 
-  // This task is subscribed to the task WDT for the whole web-server session;
-  // a slow peer would otherwise fire it while we block on the response.
-  // SecureHttpClient polls shouldAbort in every wait loop, so feed it there.
-  const auto feedWatchdog = [this]() {
-    resetTaskWatchdogIfSubscribed();
-    return false;  // never aborts; only feeds
-  };
-  // String reports allocation failure, including growth of chunked responses.
-  // Keep one bounded body buffer; larger payloads use /api/fetch.
+  // One bounded body buffer; larger payloads use /api/fetch. This task is
+  // subscribed to the task WDT for the whole web-server session, so feed it
+  // while a slow peer keeps the request waiting.
   static constexpr size_t RELAY_BODY_LIMIT = 32 * 1024;
   String respBody;
-  bool tooLarge = false;
-  bool noMemory = false;
-  bool sized = false;
-  const int status = http.sendRequest(
-      method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
-      [&](const uint8_t* data, size_t len) {
-        if (!sized) {
-          sized = true;
-          if (http.hasContentLength()) {
-            const size_t contentLength = http.getContentLength();
-            if (contentLength > RELAY_BODY_LIMIT) {
-              tooLarge = true;
-              return false;
-            }
-            if (!respBody.reserve(contentLength)) {
-              noMemory = true;
-              return false;
-            }
-          }
-        }
-        if (len > RELAY_BODY_LIMIT - respBody.length()) {
-          tooLarge = true;
-          return false;
-        }
-        if (!respBody.concat(reinterpret_cast<const char*>(data), len)) {
-          noMemory = true;
-          return false;
-        }
-        return true;
-      },
-      feedWatchdog);
-  if (noMemory) {
-    LOG_ERR("WEB", "OOM: relay response, heap %u, max block %u", (unsigned)ESP.getFreeHeap(),
-            (unsigned)ESP.getMaxAllocHeap());
-    server->send(503, "application/json", "{\"error\":\"insufficient memory for response\"}");
-    return;
-  }
-  if (tooLarge) {
-    LOG_ERR("WEB", "Relay response exceeds %u byte cap (url=%s); plugin should use /api/fetch",
-            (unsigned)RELAY_BODY_LIMIT, url.c_str());
-    server->send(413, "application/json", "{\"error\":\"response too large, use /api/fetch\"}");
-    return;
-  }
+  pluginhttp::Headers respHeaders;
+  const int status =
+      pluginhttp::request(nullptr, url, method, body, headers, respBody, RELAY_BODY_LIMIT, &respHeaders, [] {
+        resetTaskWatchdogIfSubscribed();
+        return false;  // never aborts; only feeds
+      });
+  // Transport failure, a truncated body, or one over the cap / out of memory
+  // (the reason is logged by pluginhttp).
   if (status < 0) {
-    LOG_ERR("WEB", "Relay transport failure: heap %u, max block %u: %s", (unsigned)ESP.getFreeHeap(),
-            (unsigned)ESP.getMaxAllocHeap(), url.c_str());
-    server->send(502, "application/json", "{\"error\":\"transport failure\"}");
-    return;
-  }
-  // Same truncation trap as /api/fetch: a 2xx with an incomplete body would
-  // hand the plugin a silently cut-short payload.
-  if (status >= 200 && status < 300 && !http.responseComplete()) {
-    LOG_ERR("WEB", "Relay truncated: %u bytes (heap %u): %s", (unsigned)respBody.length(), (unsigned)ESP.getFreeHeap(),
-            url.c_str());
-    server->send(502, "application/json", "{\"error\":\"response truncated\"}");
+    server->send(502, "application/json", "{\"error\":\"relay failed; large bodies need /api/fetch\"}");
     return;
   }
 
-  // Serialize only the small header set up front; the body is streamed below so
-  // it is never copied into a JsonDocument or a second String. Response headers
-  // are order- and duplicate-preserving (so every Set-Cookie is visible), as
-  // [name, value] pairs. Generic: the relay is just an authenticated HTTP proxy;
-  // it attaches no meaning to any header.
   JsonDocument headersDoc;
-  JsonArray headers = headersDoc.to<JsonArray>();
-  for (const auto& h : http.getHeaders()) {
-    JsonArray pair = headers.add<JsonArray>();
+  JsonArray headerArray = headersDoc.to<JsonArray>();
+  for (const auto& h : respHeaders) {
+    JsonArray pair = headerArray.add<JsonArray>();
     pair.add(h.first);
     pair.add(h.second);
   }
   String headersJson;
-  serializeJson(headers, headersJson);
-
-  // Stream {"status":N,"headers":[...],"body":"<escaped>"} in chunks so peak RAM
-  // is one copy of the body, not three. The body is JSON-string escaped on the
-  // fly into a small reused buffer flushed every ~512 bytes.
-  // Allocate the escape buffer before committing the response headers.
-  String chunk;
-  if (!chunk.reserve(576)) {
-    LOG_ERR("WEB", "OOM: relay escape buffer");
-    server->send(503, "application/json", "{\"error\":\"insufficient memory for response\"}");
-    return;
-  }
-  server->setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server->send(200, "application/json", "");
-  char prefix[64];
-  snprintf(prefix, sizeof(prefix), "{\"status\":%d,\"headers\":", status);
-  server->sendContent(prefix);
-  server->sendContent(headersJson);
-  server->sendContent(",\"body\":\"");
-  for (size_t i = 0; i < respBody.length(); ++i) {
-    const char c = respBody[i];
-    switch (c) {
-      case '"':
-        chunk += "\\\"";
-        break;
-      case '\\':
-        chunk += "\\\\";
-        break;
-      case '\b':
-        chunk += "\\b";
-        break;
-      case '\f':
-        chunk += "\\f";
-        break;
-      case '\n':
-        chunk += "\\n";
-        break;
-      case '\r':
-        chunk += "\\r";
-        break;
-      case '\t':
-        chunk += "\\t";
-        break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          char esc[8];
-          snprintf(esc, sizeof(esc), "\\u%04x", static_cast<unsigned char>(c));
-          chunk += esc;
-        } else {
-          chunk += c;  // raw UTF-8 bytes pass through untouched
-        }
-        break;
-    }
-    if (chunk.length() >= 512) {
-      server->sendContent(chunk.c_str());
-      chunk.remove(0);
-      resetTaskWatchdogIfSubscribed();  // each sendContent() is a blocking network write
-    }
-  }
-  if (chunk.length()) server->sendContent(chunk.c_str());
-  server->sendContent("\"}");
-  server->sendContent("");
+  serializeJson(headersDoc, headersJson);
+  server->sendHeader("X-Relay-Status", String(status));
+  server->sendHeader("X-Relay-Headers", headersJson);
+  server->send(200, "application/octet-stream", respBody);
 }
 
 namespace {
@@ -2019,21 +1899,30 @@ void CrossPointWebServer::handleCrypto() {
   JsonDocument req;
   if (!readJsonBody(req)) return;
   const std::string op = req["op"] | "";
-  auto dec = [&](const char* field) -> std::string {
-    const char* v = req[field].as<const char*>();
-    if (!v) return std::string();
-    const size_t encodedLen = strlen(v);
-    // Crypto inputs (keys, certs, small payloads) are a few KB at most. Cap the
-    // field so a LAN client can't post a multi-megabyte value and abort() the
-    // device on the fallible resize below (-fno-exceptions).
+  struct Bytes {
+    std::unique_ptr<uint8_t[]> data;
+    size_t size = 0;
+    // Never null, so an empty field is still a valid zero-length input.
+    const uint8_t* ptr() const {
+      static constexpr uint8_t kEmpty = 0;
+      return data ? data.get() : &kEmpty;
+    }
+  };
+  // Nothrow decode of a base64 field: a bundle-sized input under heap pressure
+  // must fail the op, not abort() the device (-fno-exceptions). The cap keeps
+  // a LAN client from posting a multi-megabyte value; crypto inputs (keys,
+  // certs, PKCS#12 bundles) are a few KB.
+  auto dec = [&](const char* field) {
     static constexpr size_t kMaxCryptoField = 64 * 1024;
-    if (encodedLen > kMaxCryptoField) return std::string();
-    std::string decoded;
-    decoded.resize((encodedLen * 3) / 4 + 3);
-    const int32_t decodedLen = base64Decode(v, encodedLen, reinterpret_cast<uint8_t*>(decoded.data()), decoded.size());
-    if (decodedLen < 0) return std::string();
-    decoded.resize(static_cast<size_t>(decodedLen));
-    return decoded;
+    Bytes out;
+    const char* v = req[field].as<const char*>();
+    const size_t encodedLen = v ? strlen(v) : 0;
+    if (encodedLen == 0 || encodedLen > kMaxCryptoField) return out;
+    const size_t cap = encodedLen * 3 / 4 + 3;
+    out.data = makeUniqueNoThrow<uint8_t[]>(cap);
+    const int32_t n = out.data ? base64Decode(v, encodedLen, out.data.get(), cap) : -1;
+    out.size = n < 0 ? 0 : static_cast<size_t>(n);
+    return out;
   };
 
   JsonDocument resp;
@@ -2047,89 +1936,69 @@ void CrossPointWebServer::handleCrypto() {
     if (!out.empty()) c.randomBytes(out.data(), out.size());
     resp["data"] = b64encode(out);
   } else if (op == "sha1") {
-    const std::string d = dec("data");
+    const Bytes d = dec("data");
     uint8_t h[20];
-    c.sha1(reinterpret_cast<const uint8_t*>(d.data()), d.size(), h);
+    c.sha1(d.ptr(), d.size, h);
     resp["data"] = b64encode(h, 20);
   } else if (op == "aesenc" || op == "aesdec") {
-    const std::string k = dec("key"), iv = dec("iv"), d = dec("data");
-    if (k.size() != 16 || iv.size() != 16) {
+    const Bytes k = dec("key"), iv = dec("iv"), d = dec("data");
+    if (k.size != 16 || iv.size != 16) {
       resp["error"] = "key/iv must be 16 bytes";
     } else if (op == "aesenc") {
-      std::vector<uint8_t> out(((d.size() / 16) + 1) * 16);
-      if (c.aes128CbcEncrypt(reinterpret_cast<const uint8_t*>(k.data()), reinterpret_cast<const uint8_t*>(iv.data()),
-                             reinterpret_cast<const uint8_t*>(d.data()), d.size(), out.data()))
+      std::vector<uint8_t> out(((d.size / 16) + 1) * 16);
+      if (c.aes128CbcEncrypt(k.ptr(), iv.ptr(), d.ptr(), d.size, out.data()))
         resp["data"] = b64encode(out);
       else
         resp["error"] = "aesenc failed";
+    } else if (d.size % 16 != 0) {
+      resp["error"] = "data not block-aligned";
     } else {
-      if (d.size() % 16 != 0) {
-        resp["error"] = "data not block-aligned";
-      } else {
-        std::vector<uint8_t> out(d.size());
-        if (c.aes128CbcDecrypt(reinterpret_cast<const uint8_t*>(k.data()), reinterpret_cast<const uint8_t*>(iv.data()),
-                               reinterpret_cast<const uint8_t*>(d.data()), d.size(), out.data()))
-          resp["data"] = b64encode(out);
-        else
-          resp["error"] = "aesdec failed";
-      }
+      std::vector<uint8_t> out(d.size);
+      if (c.aes128CbcDecrypt(k.ptr(), iv.ptr(), d.ptr(), d.size, out.data()))
+        resp["data"] = b64encode(out);
+      else
+        resp["error"] = "aesdec failed";
     }
   } else if (op == "keygen") {
     RsaKeyPairDer kp;
-    const bool generated = c.rsaGenerate(&kp);
-    if (generated) {
+    if (c.rsaGenerate(&kp)) {
       resp["public"] = b64encode(kp.spki);
       resp["private"] = b64encode(kp.pkcs8);
-    } else
+    } else {
       resp["error"] = "keygen failed: " + c.lastError;
+    }
   } else if (op == "pubencrypt") {
-    const std::string cert = dec("cert"), d = dec("data");
+    const Bytes cert = dec("cert"), d = dec("data");
     std::vector<uint8_t> out(512);  // off the stack; RSA output up to 4096-bit
     size_t olen = 0;
-    if (c.rsaPublicEncrypt(reinterpret_cast<const uint8_t*>(cert.data()), cert.size(),
-                           reinterpret_cast<const uint8_t*>(d.data()), d.size(), out.data(), out.size(), &olen))
+    if (c.rsaPublicEncrypt(cert.ptr(), cert.size, d.ptr(), d.size, out.data(), out.size(), &olen))
       resp["data"] = b64encode(out.data(), olen);
     else
-      resp["error"] = "pubencrypt failed: " + c.lastError + " (cert " + std::to_string(cert.size()) + "B, data " +
-                      std::to_string(d.size()) + "B)";
+      resp["error"] = "pubencrypt failed: " + c.lastError + " (cert " + std::to_string(cert.size) + "B, data " +
+                      std::to_string(d.size) + "B)";
   } else if (op == "sign") {
-    const std::string priv = dec("private"), h = dec("hash");
-    if (h.size() != 20) {
+    const Bytes priv = dec("private"), h = dec("hash");
+    uint8_t sig[128];
+    if (h.size != 20)
       resp["error"] = "hash must be 20 bytes";
-    } else {
-      uint8_t sig[128];
-      if (c.rsaPrivateSignRaw(reinterpret_cast<const uint8_t*>(priv.data()), priv.size(),
-                              reinterpret_cast<const uint8_t*>(h.data()), sig))
-        resp["data"] = b64encode(sig, 128);
-      else
-        resp["error"] = "sign failed";
-    }
+    else if (c.rsaPrivateSignRaw(priv.ptr(), priv.size, h.ptr(), sig))
+      resp["data"] = b64encode(sig, 128);
+    else
+      resp["error"] = "sign failed";
   } else if (op == "pkcs12") {
-    const char* encoded = req["data"].as<const char*>();
+    const Bytes p12 = dec("data");
     const std::string pw = req["password"] | "";
+    // The decoded bundle no longer depends on the request document. Reclaim
+    // its large base64 string before the KDF and certificate parsing begin.
+    req.clear();
     std::vector<uint8_t> key, cert;
-    const size_t encodedLen = encoded ? strlen(encoded) : 0;
-    const size_t decodedCap = (encodedLen * 3) / 4 + 3;
-    auto* p12 = static_cast<uint8_t*>(decodedCap > 0 ? malloc(decodedCap) : nullptr);
-    if (!p12) {
-      resp["error"] = "pkcs12 failed: insufficient memory for bundle";
+    if (p12.size == 0) {
+      resp["error"] = "pkcs12 failed: bundle missing, invalid, or out of memory";
+    } else if (c.pkcs12Extract(p12.ptr(), p12.size, pw, &key, &cert)) {
+      resp["key"] = b64encode(key);
+      resp["cert"] = b64encode(cert);
     } else {
-      const int32_t p12Len = base64Decode(encoded, encodedLen, p12, decodedCap);
-      // The decoded bundle no longer depends on the request document. Reclaim
-      // its large base64 string before the KDF and certificate parsing begin.
-      req.clear();
-      if (p12Len < 0) {
-        resp["error"] = "pkcs12 failed: invalid base64";
-      } else {
-        const bool extracted = c.pkcs12Extract(p12, static_cast<size_t>(p12Len), pw, &key, &cert);
-        if (extracted) {
-          resp["key"] = b64encode(key);
-          resp["cert"] = b64encode(cert);
-        } else {
-          resp["error"] = "pkcs12 failed: " + c.lastError;
-        }
-      }
-      free(p12);
+      resp["error"] = "pkcs12 failed: " + c.lastError;
     }
   } else {
     resp["error"] = "unknown op";
@@ -2167,6 +2036,9 @@ void CrossPointWebServer::handleFetch() {
   req.shrinkToFit();
   releaseRequestArguments(server.get());
 
+  // Stage in <dest>.part so an interrupted or abandoned download never sits
+  // under the real name, and an existing dest survives until the new copy is complete.
+  const std::string part = dest + ".part";
   HalFile file;
   if (requestedOffset == 0) {
     // Mirror handlePluginFs(): create missing parents so a plugin's first fetch
@@ -2176,13 +2048,13 @@ void CrossPointWebServer::handleFetch() {
     if (lastSlash != std::string::npos && lastSlash > 0) {
       Storage.ensureDirectoryExists(dest.substr(0, lastSlash).c_str());
     }
-    Storage.remove(dest.c_str());
-    if (!Storage.openFileForWrite("PLG", dest, file)) {
+    Storage.remove(part.c_str());
+    if (!Storage.openFileForWrite("PLG", part, file)) {
       server->send(500, "application/json", "{\"error\":\"cannot create file\"}");
       return;
     }
   } else {
-    file = Storage.open(dest.c_str(), O_RDWR | O_AT_END);
+    file = Storage.open(part.c_str(), O_RDWR | O_AT_END);
     const size_t existingSize = file ? file.size() : 0;
     if (!file || existingSize != requestedOffset) {
       if (file) file.close();
@@ -2193,29 +2065,16 @@ void CrossPointWebServer::handleFetch() {
     }
   }
 
-  // A 2xx only means the headers arrived; the body can still be cut short by
-  // a transport drop, a server stall, or a wolfSSL mid-record OOM. Resume from
-  // the received byte count with a Range request on a fresh connection; a
-  // server that ignores the Range (200 instead of 206) restarts the body, so
-  // the file is rewound before its first chunk lands.
+  // Resume and Range-restart handling live in fetchResumable (ResumableFetch.h).
   suspendTransferServices();
   ScopedCleanup resumeServices{[this] { resumeTransferServices(); }};
   WifiPowerSaveGuard psGuard;
 
-  // A resume keeps all prior progress, so only consecutive zero-progress
-  // attempts count against the cap; the absolute ceiling is a backstop
-  // against a dead server.
-  static constexpr int FETCH_MAX_STALLED_ATTEMPTS = 3;
-  static constexpr int FETCH_MAX_TOTAL_ATTEMPTS = 20;
   size_t written = requestedOffset;
-  size_t totalExpected = 0;
   size_t nextHeapLog = written;
   bool sdFull = false;
-  bool complete = false;
   bool segmentBoundary = false;
   bool rangeUnsupported = false;
-  int status = 0;
-  int stalled = 0;
   const unsigned long fetchStartedAt = millis();
   unsigned long lastBrowserHeartbeat = fetchStartedAt;
   bool browserResponseStarted = false;
@@ -2247,110 +2106,72 @@ void CrossPointWebServer::handleFetch() {
     }
   };
 
-  for (int attempt = 0; attempt < FETCH_MAX_TOTAL_ATTEMPTS && stalled < FETCH_MAX_STALLED_ATTEMPTS; ++attempt) {
-    freeink::SecureHttpClient http;
-    http.setUserAgent("CrossPoint");
-    // The SecureNet transport ships no CA bundle, so peer verification always
-    // fails (wolfSSL -188); skip it like HttpDownloader does. Traffic stays
-    // TLS-encrypted, just unauthenticated — matching the prior library-lending flow.
-    http.setInsecure();
-    // Some delivery servers assemble books on the fly and can stall mid-body
-    // while packaging; the default 15s no-data timeout truncates those downloads.
-    http.setTimeout(60000);
-    if (!http.begin(url)) {
-      status = -1;
-      break;
+  freeink::FetchOptions options;
+  options.startOffset = requestedOffset;
+  freeink::FetchSink sink;
+  sink.write = [&](const uint8_t* data, size_t len) {
+    resetTaskWatchdogIfSubscribed();
+    const size_t writeLen = segmentLimit > 0 ? std::min(len, requestedOffset + segmentLimit - written) : len;
+    if (file.write(data, writeLen) != writeLen) {
+      sdFull = true;
+      return false;
     }
-    for (const auto& header : requestHeaders) {
-      http.addHeader(header.first, header.second);
+    written += writeLen;
+    // Heap trajectory during the transfer: a steady value rules RAM out of a
+    // mid-body failure; a falling one implicates it.
+    if (written >= nextHeapLog) {
+      LOG_DBG("WEB", "Fetch %u bytes, heap %u", (unsigned)written, (unsigned)ESP.getFreeHeap());
+      nextHeapLog = written + 1024 * 1024;
     }
-    const bool resuming = written > 0;
-    if (resuming) {
-      char range[48];
-      snprintf(range, sizeof(range), "bytes=%u-", (unsigned)written);
-      http.addHeader("Range", range);
-      LOG_INF("WEB", "Fetch attempt %d resuming from byte %u", attempt + 1, (unsigned)written);
+    keepBrowserAlive();
+    // A bounded segment stops here; the next browser request resumes from
+    // `written` with Range.
+    if (segmentLimit > 0 && written - requestedOffset >= segmentLimit) {
+      segmentBoundary = true;
+      return false;
     }
-    bool rewindFailed = false;
-    bool firstChunk = true;
-    size_t attemptStart = written;
-    status = http.GET(
-        [&](const uint8_t* data, size_t len) {
-          resetTaskWatchdogIfSubscribed();
-          if (firstChunk) {
-            firstChunk = false;
-            // Range ignored: this body restarts from byte 0, so the file must too.
-            if (resuming && http.getStatus() == 200) {
-              if (requestedOffset > 0) {
-                rangeUnsupported = true;
-                return false;
-              }
-              file.close();
-              if (!Storage.openFileForWrite("PLG", dest, file)) {
-                rewindFailed = true;
-                return false;
-              }
-              written = 0;
-              attemptStart = 0;
-            }
-          }
-          size_t writeLen = len;
-          if (segmentLimit > 0) {
-            const size_t segmentBytes = written - requestedOffset;
-            if (segmentBytes >= segmentLimit) {
-              segmentBoundary = true;
-              return false;
-            }
-            writeLen = std::min(writeLen, segmentLimit - segmentBytes);
-          }
-          if (file.write(data, writeLen) != writeLen) {
-            sdFull = true;
-            return false;
-          }
-          written += writeLen;
-          // Heap trajectory during the transfer: a steady value rules RAM out of a
-          // mid-body failure; a falling one implicates it.
-          if (written >= nextHeapLog) {
-            LOG_DBG("WEB", "Fetch %u bytes, heap %u", (unsigned)written, (unsigned)ESP.getFreeHeap());
-            nextHeapLog = written + 1024 * 1024;
-          }
-          keepBrowserAlive();
-          if (writeLen < len || (segmentLimit > 0 && written - requestedOffset >= segmentLimit)) {
-            // The caller requested a bounded segment. Stopping the response
-            // callback closes this upstream socket cleanly; the next browser
-            // request resumes from `written` with Range.
-            segmentBoundary = true;
-            return false;
-          }
-          return true;
-        },
-        // The data callback only runs when bytes arrive; with the 60s
-        // no-data timeout a server stall would starve this task's WDT
-        // subscription. shouldAbort is polled in every wait loop.
-        [this, &keepBrowserAlive]() {
-          resetTaskWatchdogIfSubscribed();
-          keepBrowserAlive();
-          return false;  // never aborts; only feeds
-        });
-    if (sdFull || rewindFailed || rangeUnsupported) break;
-    if (status < 200 || status >= 300) break;  // http-level failure: resume cannot help
-    // A 206's Content-Length covers only the remainder, so anchor at the
-    // attempt's starting offset to get the whole-file size.
-    if (totalExpected == 0 && http.hasContentLength()) totalExpected = attemptStart + http.getContentLength();
-    if (segmentBoundary) {
-      if (totalExpected > 0 && written >= totalExpected) complete = true;
-      break;
+    return true;
+  };
+  sink.rewind = [&] {
+    // Range ignored: the body restarts from byte 0, which only a transfer
+    // that has not yet reported progress to the browser can follow.
+    if (requestedOffset > 0) {
+      rangeUnsupported = true;
+      return false;
     }
-    if (http.responseComplete()) {
-      complete = true;
-      break;
-    }
-    LOG_ERR("WEB", "Fetch truncated: %u of %u bytes (heap %u, attempt %d): %s", (unsigned)written,
-            (unsigned)totalExpected, (unsigned)ESP.getFreeHeap(), attempt + 1, url.c_str());
-    stalled = written > attemptStart ? 0 : stalled + 1;
+    file.close();
+    written = 0;
+    return Storage.openFileForWrite("PLG", part, file);
+  };
+  const freeink::FetchResult result = freeink::fetchResumable(
+      url, options,
+      [&](freeink::SecureHttpClient& http) {
+        http.setUserAgent("CrossPoint");
+        // The SecureNet transport ships no CA bundle, so peer verification always
+        // fails (wolfSSL -188); skip it like HttpDownloader does. Traffic stays
+        // TLS-encrypted, just unauthenticated — matching the prior library-lending flow.
+        http.setInsecure();
+        // Some delivery servers assemble books on the fly and can stall mid-body
+        // while packaging; the default 15s no-data timeout truncates those downloads.
+        http.setTimeout(60000);
+        for (const auto& header : requestHeaders) http.addHeader(header.first, header.second);
+      },
+      sink,
+      // The write callback only runs when bytes arrive; with the 60s no-data
+      // timeout a server stall would starve this task's WDT subscription.
+      // shouldAbort is polled in every wait loop.
+      [&] {
+        resetTaskWatchdogIfSubscribed();
+        keepBrowserAlive();
+        return false;  // never aborts; only feeds
+      });
+  if (file.isOpen()) {
+    file.flush();
+    file.close();
   }
-  file.flush();
-  file.close();
+  const int status = result.status;
+  const size_t totalExpected = result.total;
+  bool complete = result.complete || (segmentBoundary && totalExpected > 0 && written >= totalExpected);
 
   if (segmentBoundary && !complete && status >= 200 && status < 300) {
     JsonDocument resp;
@@ -2367,7 +2188,7 @@ void CrossPointWebServer::handleFetch() {
   }
 
   if (!complete && status >= 200 && status < 300) {
-    Storage.remove(dest.c_str());
+    Storage.remove(part.c_str());
     char msg[96];
     const char* error = sdFull ? "sd write failed" : rangeUnsupported ? "range unsupported" : "download truncated";
     // complete:false matters once the heartbeat has committed HTTP 200 chunked:
@@ -2382,8 +2203,12 @@ void CrossPointWebServer::handleFetch() {
 
   JsonDocument resp;
   if (status < 200 || status >= 300) {
-    Storage.remove(dest.c_str());
+    Storage.remove(part.c_str());
     resp["error"] = status < 0 ? "transport failure" : "http status";
+  } else if (!Storage.replaceFile(part.c_str(), dest.c_str())) {
+    Storage.remove(part.c_str());
+    complete = false;
+    resp["error"] = "sd write failed";
   }
   resp["status"] = status;
   resp["bytes"] = written;
@@ -2434,18 +2259,12 @@ void CrossPointWebServer::handlePluginFs() {
   if (lastSlash != std::string::npos && lastSlash > 0) {
     Storage.ensureDirectoryExists(path.substr(0, lastSlash).c_str());
   }
-  HalFile f;
-  if (!Storage.openFileForWrite("PLG", path, f)) {
-    server->send(500, "application/json", "{\"error\":\"cannot write\"}");
-    return;
-  }
-  const size_t n = f.write(data, dataSize);
-  f.flush();
-  f.close();
-
+  // Replaces the old file only once the new one is complete, so a failed save
+  // never truncates a plugin's stored credentials.
+  const bool ok = Storage.writeFile(path.c_str(), rawData);
   JsonDocument resp;
-  resp["ok"] = (n == dataSize);
-  resp["bytes"] = n;
+  resp["ok"] = ok;
+  resp["bytes"] = ok ? dataSize : 0;
   sendJson(resp);
 }
 
@@ -2890,7 +2709,11 @@ void CrossPointWebServer::handleFontUploadData() {
         remaining -= chunk;
 
         if (fontUpload.bufferPos >= FontUploadState::BUFFER_SIZE) {
-          fontUpload.file.write(fontUpload.buffer.get(), fontUpload.bufferPos);
+          if (fontUpload.file.write(fontUpload.buffer.get(), fontUpload.bufferPos) != fontUpload.bufferPos) {
+            LOG_ERR("WEB", "Font upload write failed: %s", fontUpload.filePath.c_str());
+            fontUpload.valid = false;
+            break;
+          }
           fontUpload.bytesWritten += fontUpload.bufferPos;
           fontUpload.bufferPos = 0;
           resetTaskWatchdogIfSubscribed();
@@ -2902,7 +2725,10 @@ void CrossPointWebServer::handleFontUploadData() {
     case UPLOAD_FILE_END: {
       // Flush remaining buffer
       if (fontUpload.valid && fontUpload.bufferPos > 0) {
-        fontUpload.file.write(fontUpload.buffer.get(), fontUpload.bufferPos);
+        if (fontUpload.file.write(fontUpload.buffer.get(), fontUpload.bufferPos) != fontUpload.bufferPos) {
+          LOG_ERR("WEB", "Font upload write failed: %s", fontUpload.filePath.c_str());
+          fontUpload.valid = false;
+        }
         fontUpload.bytesWritten += fontUpload.bufferPos;
         fontUpload.bufferPos = 0;
       }

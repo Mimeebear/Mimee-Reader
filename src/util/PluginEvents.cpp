@@ -423,11 +423,10 @@ void drain(GfxRenderer* renderer, const size_t maxEvents) {
       Storage.remove(path.c_str());
     } else if (pos > 0) {
       // Rewrite the unprocessed tail so delivered events are not replayed.
-      const std::string tail = raw.substr(pos);
-      HalFile file;
-      if (Storage.openFileForWrite("PEVT", path, file)) {
-        file.write(reinterpret_cast<const uint8_t*>(tail.data()), tail.size());
-        file.flush();
+      // writeFile keeps the old outbox if the rewrite fails: replaying delivered
+      // events beats losing undelivered ones.
+      if (!Storage.writeFile(path.c_str(), String(raw.c_str() + pos))) {
+        LOG_ERR("PEVT", "%s: outbox rewrite failed", sub.name);
       }
     }
     LOG_DBG("PEVT", "%s: drained (stalled=%d)", sub.name, stalled);
