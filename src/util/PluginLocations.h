@@ -7,8 +7,8 @@
 // /.plugins are friendlier for users copying folders onto the card from a
 // computer.
 namespace PluginLocations {
-inline constexpr const char* kRoots[] = {"/.crosspoint/plugins", "/plugins", "/.plugins"};
-inline constexpr size_t kRootCount = sizeof(kRoots) / sizeof(kRoots[0]);
+inline constexpr const char* ROOTS[] = {"/.crosspoint/plugins", "/plugins", "/.plugins"};
+inline constexpr size_t ROOT_COUNT = sizeof(ROOTS) / sizeof(ROOTS[0]);
 
 enum class DeviceKind { None, Catalog, Background };
 enum class PickerAction { None, Catalog, Readme };

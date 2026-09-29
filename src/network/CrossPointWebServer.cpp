@@ -1808,7 +1808,6 @@ void CrossPointWebServer::handlePluginFile() const {
   const std::string path = pluginDir + "/" + file.c_str();
   HalFile f = Storage.open(path.c_str(), O_RDONLY);
   if (!f || !f.isOpen() || f.isDirectory()) {
-    if (f) f.close();
     server->send(404, "text/plain", "not found");
     return;
   }
@@ -1816,7 +1815,6 @@ void CrossPointWebServer::handlePluginFile() const {
   server->setContentLength(f.size());
   server->send(200, pluginContentType(file), "");
   streamFileToClient(f);
-  f.close();
 }
 
 // POST /api/relay {plugin, method, url, headers:{}, body}
@@ -1904,8 +1902,8 @@ void CrossPointWebServer::handleCrypto() {
     size_t size = 0;
     // Never null, so an empty field is still a valid zero-length input.
     const uint8_t* ptr() const {
-      static constexpr uint8_t kEmpty = 0;
-      return data ? data.get() : &kEmpty;
+      static constexpr uint8_t EMPTY = 0;
+      return data ? data.get() : &EMPTY;
     }
   };
   // Nothrow decode of a base64 field: a bundle-sized input under heap pressure
@@ -1913,11 +1911,11 @@ void CrossPointWebServer::handleCrypto() {
   // a LAN client from posting a multi-megabyte value; crypto inputs (keys,
   // certs, PKCS#12 bundles) are a few KB.
   auto dec = [&](const char* field) {
-    static constexpr size_t kMaxCryptoField = 64 * 1024;
+    static constexpr size_t MAX_CRYPTO_FIELD = 64 * 1024;
     Bytes out;
     const char* v = req[field].as<const char*>();
     const size_t encodedLen = v ? strlen(v) : 0;
-    if (encodedLen == 0 || encodedLen > kMaxCryptoField) return out;
+    if (encodedLen == 0 || encodedLen > MAX_CRYPTO_FIELD) return out;
     const size_t cap = encodedLen * 3 / 4 + 3;
     out.data = makeUniqueNoThrow<uint8_t[]>(cap);
     const int32_t n = out.data ? base64Decode(v, encodedLen, out.data.get(), cap) : -1;
@@ -1930,8 +1928,8 @@ void CrossPointWebServer::handleCrypto() {
   WolfsslCrypto c;
 
   if (op == "random") {
-    static constexpr int kMaxRandomBytes = 4096;  // generous for keys/salts/tokens; blocks a runaway allocation
-    const int n = std::clamp(static_cast<int>(req["len"] | 16), 0, kMaxRandomBytes);
+    static constexpr int MAX_RANDOM_BYTES = 4096;  // generous for keys/salts/tokens; blocks a runaway allocation
+    const int n = std::clamp(static_cast<int>(req["len"] | 16), 0, MAX_RANDOM_BYTES);
     std::vector<uint8_t> out(n);
     if (!out.empty()) c.randomBytes(out.data(), out.size());
     resp["data"] = b64encode(out);
@@ -2025,13 +2023,8 @@ void CrossPointWebServer::handleFetch() {
     return;
   }
 
-  std::vector<std::pair<std::string, std::string>> requestHeaders;
-  if (req["headers"].is<JsonObject>()) {
-    for (JsonPair kv : req["headers"].as<JsonObject>()) {
-      const char* value = kv.value().as<const char*>();
-      requestHeaders.emplace_back(kv.key().c_str(), value ? value : "");
-    }
-  }
+  pluginhttp::Headers requestHeaders;
+  pluginhttp::readHeaders(req["headers"], requestHeaders);
   req.clear();
   req.shrinkToFit();
   releaseRequestArguments(server.get());
@@ -2177,21 +2170,12 @@ void CrossPointWebServer::handleFetch() {
   const size_t totalExpected = result.total;
   bool complete = result.complete || (segmentBoundary && totalExpected > 0 && written >= totalExpected);
 
-  if (segmentBoundary && !complete && status >= 200 && status < 300) {
-    JsonDocument resp;
-    resp["status"] = status;
-    resp["bytes"] = written;
-    resp["complete"] = false;
-    if (totalExpected > 0) resp["total"] = totalExpected;
-    String out;
-    serializeJson(resp, out);
-    LOG_INF("WEB", "Fetch segment complete: %u bytes total in %lu ms: %s", (unsigned)written, millis() - fetchStartedAt,
-            url.c_str());
-    sendFetchResult(200, out);
-    return;
-  }
+  const bool ok2xx = status >= 200 && status < 300;
+  // A bounded segment ended mid-body: the browser requests the next one, so
+  // the .part stays and nothing is installed yet.
+  const bool midSegment = segmentBoundary && !complete && ok2xx;
 
-  if (!complete && status >= 200 && status < 300) {
+  if (!complete && ok2xx && !midSegment) {
     Storage.remove(part.c_str());
     char msg[96];
     const char* error = sdFull ? "sd write failed" : rangeUnsupported ? "range unsupported" : "download truncated";
@@ -2206,10 +2190,10 @@ void CrossPointWebServer::handleFetch() {
   }
 
   JsonDocument resp;
-  if (status < 200 || status >= 300) {
+  if (!ok2xx) {
     Storage.remove(part.c_str());
     resp["error"] = status < 0 ? "transport failure" : "http status";
-  } else if (!Storage.replaceFile(part.c_str(), dest.c_str())) {
+  } else if (complete && !Storage.replaceFile(part.c_str(), dest.c_str())) {
     Storage.remove(part.c_str());
     complete = false;
     resp["error"] = "sd write failed";
@@ -2221,8 +2205,11 @@ void CrossPointWebServer::handleFetch() {
   String out;
   serializeJson(resp, out);
   const bool browserConnected = server->client().connected();
-  LOG_INF("WEB", "Fetch %s: %u bytes in %lu ms, browser %s: %s", complete ? "complete" : "failed", (unsigned)written,
-          millis() - fetchStartedAt, browserConnected ? "connected" : "disconnected", url.c_str());
+  LOG_INF("WEB", "Fetch %s: %u bytes in %lu ms, browser %s: %s",
+          midSegment ? "segment done"
+          : complete ? "complete"
+                     : "failed",
+          (unsigned)written, millis() - fetchStartedAt, browserConnected ? "connected" : "disconnected", url.c_str());
   sendFetchResult(200, out);
 }
 
@@ -2427,10 +2414,10 @@ void CrossPointWebServer::handlePluginJobComplete() {
 // GET /api/plugin-jobs/status?id=<n> -> {id, state, result}
 void CrossPointWebServer::handlePluginJobStatus() {
   const uint32_t id = strtoul(server->arg("id").c_str(), nullptr, 10);
-  static constexpr const char* kStateNames[] = {"empty", "pending", "running", "done", "error"};
+  static constexpr const char* STATE_NAMES[] = {"empty", "pending", "running", "done", "error"};
   for (auto& job : pluginJobs) {
     if (job.id != id || job.state == JOB_EMPTY) continue;
-    const std::string msg = "{\"id\":" + std::to_string(id) + ",\"state\":\"" + kStateNames[job.state] +
+    const std::string msg = "{\"id\":" + std::to_string(id) + ",\"state\":\"" + STATE_NAMES[job.state] +
                             "\",\"result\":" + (job.result[0] ? job.result : "null") + "}";
     server->send(200, "application/json", msg.c_str());
     return;

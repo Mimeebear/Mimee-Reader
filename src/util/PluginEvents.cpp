@@ -17,12 +17,12 @@
 
 namespace {
 
-constexpr const char* kEventNames[] = {"reader.open", "reader.exit", "reader.session", "book.downloaded",
+constexpr const char* EVENT_NAMES[] = {"reader.open", "reader.exit", "reader.session", "book.downloaded",
                                        "sleep.enter"};
-static_assert(sizeof(kEventNames) / sizeof(kEventNames[0]) == static_cast<size_t>(pluginevents::Event::COUNT),
+static_assert(sizeof(EVENT_NAMES) / sizeof(EVENT_NAMES[0]) == static_cast<size_t>(pluginevents::Event::COUNT),
               "event name table out of sync");
 
-constexpr const char* kOutboxName = "/events.jsonl";
+constexpr const char* OUTBOX_NAME = "/events.jsonl";
 // Drop-oldest wholesale: a plugin that is never drained must not grow a file
 // forever, and by the time 4KB of events piled up the old ones describe stale
 // state anyway.
@@ -48,12 +48,12 @@ uint8_t eventBit(const pluginevents::Event e) { return static_cast<uint8_t>(1u <
 
 int eventFromName(const char* name) {
   for (size_t i = 0; i < static_cast<size_t>(pluginevents::Event::COUNT); i++) {
-    if (strcmp(kEventNames[i], name) == 0) return static_cast<int>(i);
+    if (strcmp(EVENT_NAMES[i], name) == 0) return static_cast<int>(i);
   }
   return -1;
 }
 
-std::string outboxPath(const Subscriber& sub) { return std::string(sub.dir) + kOutboxName; }
+std::string outboxPath(const Subscriber& sub) { return std::string(sub.dir) + OUTBOX_NAME; }
 
 }  // namespace
 
@@ -132,7 +132,7 @@ bool wantsConnectAny() {
     for (size_t i = 0; i < static_cast<size_t>(Event::COUNT); i++) {
       if (!(sub.connectMask & eventBit(static_cast<Event>(i)))) continue;
       char eventField[48];
-      snprintf(eventField, sizeof(eventField), "\"e\":\"%s\"", kEventNames[i]);
+      snprintf(eventField, sizeof(eventField), "\"e\":\"%s\"", EVENT_NAMES[i]);
       if (raw.find(eventField) != std::string::npos) return true;
     }
   }
@@ -144,7 +144,7 @@ void emit(const Event e, const Var* vars, const size_t varCount) {
 
   // One line: {"e":"reader.exit","id":"3fa9c21b-7","ts":1734212345,"vars":{"book":"...","percent":"74"}}
   JsonDocument doc;
-  doc["e"] = kEventNames[static_cast<size_t>(e)];
+  doc["e"] = EVENT_NAMES[static_cast<size_t>(e)];
   // Unique id for server-side dedupe of at-least-once delivery: a per-boot
   // nonce plus an in-session counter, unique across queued events and reboots
   // without an SD read-modify-write per event. ts alone repeats (1-second

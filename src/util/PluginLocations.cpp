@@ -11,8 +11,8 @@ std::vector<Entry> scanPlugins() {
   plugins.reserve(8);
   std::vector<std::string> seen;
   seen.reserve(8);
-  for (size_t r = 0; r < kRootCount; r++) {
-    HalFile root = Storage.open(kRoots[r]);
+  for (size_t r = 0; r < ROOT_COUNT; r++) {
+    HalFile root = Storage.open(ROOTS[r]);
     if (!root || !root.isDirectory()) continue;
     for (HalFile entry = root.openNextFile(); entry; entry = root.openNextFile()) {
       if (!entry.isDirectory()) continue;
@@ -25,7 +25,7 @@ std::vector<Entry> scanPlugins() {
 
       Entry e;
       e.name = name;
-      e.dir = std::string(kRoots[r]) + "/" + name;
+      e.dir = std::string(ROOTS[r]) + "/" + name;
       e.hasPluginJs = Storage.exists((e.dir + "/plugin.js").c_str());
       e.hasDevice = Storage.exists((e.dir + "/device.json").c_str());
       e.hasManifest = Storage.exists((e.dir + "/manifest.json").c_str());
@@ -36,8 +36,8 @@ std::vector<Entry> scanPlugins() {
 }
 
 std::string findPluginDir(const char* name) {
-  for (size_t i = 0; i < kRootCount; i++) {
-    std::string dir = std::string(kRoots[i]) + "/" + name;
+  for (size_t i = 0; i < ROOT_COUNT; i++) {
+    std::string dir = std::string(ROOTS[i]) + "/" + name;
     if (Storage.exists(dir.c_str())) return dir;
   }
   return {};

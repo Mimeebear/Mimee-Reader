@@ -27,7 +27,7 @@ namespace {
 
 // The access credential is provisioned off-device and dropped here.
 // Generic path — the reader carries no scheme name.
-constexpr const char* kCredentialPath = "/.crosspoint/content.key";
+constexpr const char* CREDENTIAL_PATH = "/.crosspoint/content.key";
 
 // One shared crypto backend for the whole read path.
 WolfsslCrypto& crypto() {
@@ -99,8 +99,8 @@ class ProtectedBookDecryptor : public ContentDecryptor {
 
 std::unique_ptr<ContentDecryptor> openProtectedBook(const std::string& epubPath, std::string& err) {
   err.clear();
-  // Field-report heap ledger: this is where tight-heap opens historically
-  // died; the pair below tells fragmentation (largest collapses) from a leak.
+  // Heap at open for crash reports: free vs largest block tells fragmentation
+  // (largest collapses) from a leak.
   LOG_INF("CPRO", "open: free=%u max_block=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 
   // open() is the single existence test: a missing path fails to open.
@@ -117,7 +117,7 @@ std::unique_ptr<ContentDecryptor> openProtectedBook(const std::string& epubPath,
   // A book carrying encryption.xml may only obfuscate its embedded fonts
   // (not content-protected). The SDK demands the credential only after parsing
   // the manifest and finding genuinely encrypted entries.
-  SdByteSource credSource(kCredentialPath);
+  SdByteSource credSource(CREDENTIAL_PATH);
   Credential credential;
   const bool haveCredential = credSource.open() && parseCredential(credSource, &credential);
 
@@ -134,11 +134,11 @@ std::unique_ptr<ContentDecryptor> openProtectedBook(const std::string& epubPath,
     // A real rights document is a few KB; 64KB is a generous ceiling. The
     // largest-block check keeps the resize below from aborting on OOM (string
     // growth is a bare allocation under -fno-exceptions).
-    constexpr uint64_t kMaxRightsSize = 64 * 1024;
+    constexpr uint64_t MAX_RIGHTS_SIZE = 64 * 1024;
     SdByteSource rightsSource(epubPath + ".rights");
     if (rightsSource.open()) {
       const uint64_t rsize = rightsSource.size();
-      if (rsize > 0 && rsize <= kMaxRightsSize &&
+      if (rsize > 0 && rsize <= MAX_RIGHTS_SIZE &&
           heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) > static_cast<size_t>(rsize) + 8 * 1024) {
         rightsOverride.resize(static_cast<size_t>(rsize));
         const int32_t rn = rightsSource.readAt(0, rightsOverride.data(), static_cast<uint32_t>(rsize));

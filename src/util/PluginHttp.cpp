@@ -37,6 +37,7 @@ bool segIsIndex(const std::string& seg) { return !seg.empty() && isdigit(static_
 
 void splitPath(const std::string& dotted, std::vector<std::string>& out) {
   out.clear();
+  out.reserve(static_cast<size_t>(std::count(dotted.begin(), dotted.end(), '.')) + 1);
   size_t start = 0;
   while (start <= dotted.size()) {
     const size_t dot = dotted.find('.', start);
@@ -93,7 +94,9 @@ void readRequest(JsonVariantConst node, const char* defaultMethod, RequestSpec& 
 
 void readHeaders(JsonVariantConst node, Headers& out) {
   out.clear();
-  for (JsonPairConst kv : node.as<JsonObjectConst>()) {
+  const JsonObjectConst headers = node.as<JsonObjectConst>();
+  out.reserve(headers.size());
+  for (JsonPairConst kv : headers) {
     out.emplace_back(kv.key().c_str(), kv.value().as<const char*>() ? kv.value().as<const char*>() : "");
   }
 }
@@ -158,7 +161,9 @@ void loadConfigFile(const std::string& file, Headers& out) {
   if (!Storage.readFileToString("PHTP", file, MAX_TOKEN_FILE_SIZE, raw)) return;
   JsonDocument doc;
   if (deserializeJson(doc, raw) != DeserializationError::Ok) return;
-  for (JsonPairConst kv : doc.as<JsonObjectConst>()) {
+  const JsonObjectConst fields = doc.as<JsonObjectConst>();
+  out.reserve(fields.size());
+  for (JsonPairConst kv : fields) {
     out.emplace_back(kv.key().c_str(), variantToString(kv.value()));
   }
 }
