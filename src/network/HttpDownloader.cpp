@@ -52,6 +52,10 @@ HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::st
 
   if (result.aborted) return HttpDownloader::ABORTED;
   if (result.stopped) return HttpDownloader::FILE_ERROR;
+  if (result.status == 401 || result.status == 403) {
+    LOG_ERR("HTTP", "wolfSSL request unauthorized: status %d: %s", result.status, url.c_str());
+    return HttpDownloader::UNAUTHORIZED;
+  }
   if (result.status < 200 || result.status >= 300) {
     LOG_ERR("HTTP", "wolfSSL request failed: status %d: %s", result.status, url.c_str());
     return HttpDownloader::HTTP_ERROR;

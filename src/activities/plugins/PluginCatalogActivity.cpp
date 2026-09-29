@@ -20,7 +20,7 @@
 #include <new>
 
 #include "MappedInputManager.h"
-#include "activities/reader/ReaderActivity.h"  // README viewer
+#include "activities/reader/DictionaryDefinitionActivity.h"  // plain-text README viewer
 #include "components/CatalogScreens.h"
 #include "components/UITheme.h"
 #include "network/HttpDownloader.h"
@@ -616,6 +616,12 @@ void PluginCatalogActivity::beginAuth() {
 }
 
 void PluginCatalogActivity::pollAuth() {
+  // Checked before polling so an expired code fails even while every poll
+  // hits a transport error (offline).
+  if (static_cast<long>(millis() - authDeadlineMs) >= 0) {
+    fail(StrId::STR_PLUGIN_AUTH_FAILED);
+    return;
+  }
   authNextPollMs = millis() + authIntervalMs;
 
   auto req = substitutedRequest(manifest.pollReq);
@@ -646,10 +652,6 @@ void PluginCatalogActivity::pollAuth() {
       return;
     }
     // authorization_pending (or anything unrecognized): keep polling
-  }
-
-  if (static_cast<long>(millis() - authDeadlineMs) >= 0) {
-    fail(StrId::STR_PLUGIN_AUTH_FAILED);
   }
 }
 
@@ -753,7 +755,11 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBook(const Item& it
   std::string fileUrl;
   if (!manifest.dlUrlPath.empty()) {
     String response;
-    const int status = apiRequest(substitutedRequest(manifest.downloadReq, &item), response);
+    int status = apiRequest(substitutedRequest(manifest.downloadReq, &item), response);
+    // An expired password-grant token: mint a fresh one and retry once.
+    if ((status == 401 || status == 403) && manifest.hasPasswordGrant() && refreshCredentialToken()) {
+      status = apiRequest(substitutedRequest(manifest.downloadReq, &item), response);
+    }
     if (status < 200 || status >= 300) {
       return HttpDownloader::HTTP_ERROR;
     }
@@ -792,12 +798,21 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBook(const Item& it
 
   // url_path already authenticated the JSON hop; the resolved file URL must not
   // inherit those headers (S3 pre-signed GETs reject a second Authorization).
-  const std::vector<HttpDownloader::Header> fileHeaders = manifest.dlUrlPath.empty()
-                                                              ? substitutedHeaders(manifest.downloadReq.headers, &item)
-                                                              : std::vector<HttpDownloader::Header>{};
+  const auto fetchFile = [&] {
+    const std::vector<HttpDownloader::Header> fileHeaders =
+        manifest.dlUrlPath.empty() ? substitutedHeaders(manifest.downloadReq.headers, &item)
+                                   : std::vector<HttpDownloader::Header>{};
+    return downloadFile(fileUrl, dest, substituted(manifest.dlUser, &item), substituted(manifest.dlPass, &item),
+                        fileHeaders);
+  };
   session.reset();  // free browse TLS before the large file GET
-  const auto result = downloadFile(fileUrl, dest, substituted(manifest.dlUser, &item),
-                                   substituted(manifest.dlPass, &item), fileHeaders);
+  auto result = fetchFile();
+  // The direct GET carries the catalog's token templates (never a pre-signed
+  // url_path target): an expired password-grant token gets one mint-and-retry.
+  if (result == HttpDownloader::UNAUTHORIZED && manifest.dlUrlPath.empty() && manifest.hasPasswordGrant() &&
+      refreshCredentialToken()) {
+    result = fetchFile();
+  }
   if (result != HttpDownloader::OK) return result;
   clearBookCache(dest);
 
@@ -932,10 +947,24 @@ void PluginCatalogActivity::activateIndex(const int index) {
     const PluginRef& plugin = installedPlugins[index - (showOpds ? 1 : 0)];
     const auto action = PluginLocations::pickerAction(plugin.deviceKind, !plugin.readmePath.empty());
     if (action == PluginLocations::PickerAction::Readme) {
-      auto reader = ReaderActivity::create(renderer, mappedInput, plugin.readmePath, false);
-      if (!reader) return;
+      // A plain paged text view, not the book reader: viewing instructions must
+      // not touch the last-read book, recents, progress, or reader events.
+      // Capped: a README is setup notes, not a book, and lives in RAM here.
+      static constexpr size_t MAX_README_BYTES = 16 * 1024;
+      std::string text;
+      if (!Storage.readFileToString("PCAT", plugin.readmePath, MAX_README_BYTES, text)) {
+        LOG_ERR("PCAT", "README unreadable, empty, or over %u bytes: %s", static_cast<unsigned>(MAX_README_BYTES),
+                plugin.readmePath.c_str());
+        return;
+      }
+      auto viewer =
+          makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, plugin.title, std::move(text));
+      if (!viewer) {
+        LOG_ERR("PCAT", "OOM: README viewer");
+        return;
+      }
       app.clearTapFlash();
-      startActivityForResult(std::move(reader), [](const ActivityResult&) {});
+      startActivityForResult(std::move(viewer), [](const ActivityResult&) {});
       return;
     }
     if (action != PluginLocations::PickerAction::Catalog) return;
@@ -1137,13 +1166,13 @@ void PluginCatalogActivity::rebuildRowItems() {
   if (state == State::PLUGIN_PICKER) {
     if (showOpds) addRow(tr(STR_OPDS_BROWSER), tr(STR_OPDS_SERVERS));
     for (const auto& plugin : installedPlugins) {
-      //   None       -> listed but inert, web-only hint, no chevron
+      //   None       -> web-only hint; chevron only with a readme
       //   Catalog    -> browsable, own description, chevron
       //   Background -> events-only, own description, chevron only with a readme
       const char* subtitle = plugin.description.empty() ? nullptr : plugin.description.c_str();
       switch (plugin.deviceKind) {
         case PluginLocations::DeviceKind::None:
-          addRow(plugin.title.c_str(), tr(STR_PLUGIN_WEB_ONLY));
+          addRow(plugin.title.c_str(), tr(STR_PLUGIN_WEB_ONLY), plugin.readmePath.empty() ? nullptr : ">");
           break;
         case PluginLocations::DeviceKind::Catalog:
           addRow(plugin.title.c_str(), subtitle, ">");

@@ -172,6 +172,7 @@ class CrossPointWebServer {
   // lifetime) object: no allocation per job, oldest finished slot recycled.
   struct PluginJob {
     uint32_t id = 0;         // 0 = empty slot
+    uint32_t claim = 0;      // current claim; a completion must echo it
     uint32_t updatedAt = 0;  // millis() of last state change
     uint8_t state = 0;
     char plugin[24] = {0};
@@ -188,6 +189,7 @@ class CrossPointWebServer {
   static constexpr uint32_t PLUGIN_JOB_LEASE_MS = 10UL * 60 * 1000;
   PluginJob pluginJobs[MAX_PLUGIN_JOBS];
   uint32_t nextPluginJobId = 1;
+  uint32_t nextPluginJobClaim = 1;
   PluginJob* allocPluginJob();
   void handlePluginRunnerPage() const;  // GET /plugins-run -> headless executor page
   void handlePluginJobSubmit();         // POST /api/plugin-jobs          -> {id}

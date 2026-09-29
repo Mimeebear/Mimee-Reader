@@ -25,7 +25,6 @@
 #include "components/UiAppHelpers.h"  // list icons for the compare rows
 #include "fontIds.h"
 #include "network/WifiPowerSaveGuard.h"
-#include "util/PluginHttp.h"
 
 namespace fui = freeink::ui;
 
@@ -355,7 +354,8 @@ void KOReaderSyncActivity::performUpload() {
     // Plugin sidecar fields ("<book>.meta.json", written at download time via
     // the catalog sidecar mechanism or /api/plugin-fs) ride along so a custom
     // sync server can route progress by a service book id.
-    pluginhttp::loadConfigFile(epubPath + ".meta.json", meta.extra);
+    // A missing sidecar (the common case) leaves extraJson empty.
+    Storage.readFileToString("KOSync", epubPath + ".meta.json", 2 * 1024, meta.extraJson);
     progress.metadata = std::move(meta);
   }
 

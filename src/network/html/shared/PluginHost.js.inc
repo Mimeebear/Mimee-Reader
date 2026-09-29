@@ -22,12 +22,7 @@
       if (this._actionBusy) return;
       this._actionBusy = true;
       try {
-        if (this._pendingCompletion) {
-          try {
-            await this._post('/api/plugin-jobs/complete', this._pendingCompletion);
-            this._pendingCompletion = null;
-          } catch (e) { return; }
-        }
+        if (this._pendingCompletion && !(await this._sendCompletion())) return;
         for (const plugin of Object.keys(this._actions)) {
           let job;
           try { job = await (await fetch('/api/plugin-jobs/claim?plugin=' + encodeURIComponent(plugin))).json(); }
@@ -42,21 +37,32 @@
             try { result = (await fn(job.args || {})) || {}; ok = true; }
             catch (e) { result = { error: String((e && e.message) || e) }; }
           }
-          this._pendingCompletion = { id: job.id, ok, result };
-          try {
-            await this._post('/api/plugin-jobs/complete', this._pendingCompletion);
-            this._pendingCompletion = null;
-          } catch (e) { return; }
+          this._pendingCompletion = { id: job.id, claim: job.claim, ok, result };
+          if (!(await this._sendCompletion())) return;
         }
       } finally {
         this._actionBusy = false;
       }
     },
+    // Posts the pending completion; false means retry on the next poll. A 4xx
+    // is final (stale claim after a lease expiry, recycled job): drop it
+    // rather than retry forever. Transport errors and 5xx retry.
+    async _sendCompletion() {
+      try {
+        await this._post('/api/plugin-jobs/complete', this._pendingCompletion);
+      } catch (e) {
+        if (!(e.status >= 400 && e.status < 500)) return false;
+      }
+      this._pendingCompletion = null;
+      return true;
+    },
     async _readResponse(r, path) {
       if (!r.ok) {
         let detail = '';
         try { detail = (await r.json()).error || ''; } catch (e) {}
-        throw new Error(path + ' ' + r.status + (detail ? ': ' + detail : ''));
+        const err = new Error(path + ' ' + r.status + (detail ? ': ' + detail : ''));
+        err.status = r.status;
+        throw err;
       }
       return r.json();
     },

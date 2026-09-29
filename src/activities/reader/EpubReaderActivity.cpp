@@ -1179,24 +1179,41 @@ bool EpubReaderActivity::handleLoadFailure() {
 }
 
 void EpubReaderActivity::beginLoanTimeSync() {
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) {
-                           if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
-                             finish();
-                             return;
-                           }
-                           GUI.drawPopup(renderer, tr(STR_SYNCING_TIME));
-                           trustedtime::syncNow(5000);
-                           APP_STATE.openEpubPath = bookPath;
-                           APP_STATE.saveToFile();
-                           WiFi.disconnect(false);
-                           delay(30);
-                           // Reboot straight back into this book with a clean heap
-                           // (no-op on touch boards, which fall through to the
-                           // in-place relaunch below).
-                           silentRestartToReader();
-                           activityManager.goToReader(bookPath);
-                         });
+  auto wifi = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput);
+  if (!wifi) {
+    LOG_ERR("ERS", "OOM: Wi-Fi selection for loan time sync");
+    finish();
+    return;
+  }
+  startActivityForResult(std::move(wifi), [this](const ActivityResult& result) {
+    if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+      finish();
+      return;
+    }
+    GUI.drawPopup(renderer, tr(STR_SYNCING_TIME));
+    const bool synced = trustedtime::syncNow(5000);
+    WiFi.disconnect(false);
+    delay(30);
+    if (!synced) {
+      // Reopening would hit the same unverified-time refusal: offer a retry.
+      const char* options[2] = {I18N.get(StrId::STR_RETRY), I18N.get(StrId::STR_OK_BUTTON)};
+      loadFailurePopup.showMessage("", I18N.get(StrId::STR_CLOCK_SYNC_FAIL), options, 2, 0, [this](const int index) {
+        if (index == 0) {
+          beginLoanTimeSync();
+          return;
+        }
+        finish();
+      });
+      requestUpdate();
+      return;
+    }
+    APP_STATE.openEpubPath = bookPath;
+    APP_STATE.saveToFile();
+    // Reboot straight back into this book with a clean heap (no-op on touch
+    // boards, which fall through to the in-place relaunch below).
+    silentRestartToReader();
+    activityManager.goToReader(bookPath);
+  });
 }
 
 void EpubReaderActivity::render(RenderLock&& lock) {

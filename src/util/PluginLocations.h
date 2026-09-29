@@ -19,10 +19,11 @@ constexpr DeviceKind classifyDeviceManifest(const bool hasBrowseUrl, const bool 
   return DeviceKind::None;
 }
 
+// A catalog opens; any other plugin with a README shows it (web-only plugins
+// included, so their setup notes are readable on the device).
 constexpr PickerAction pickerAction(const DeviceKind kind, const bool hasReadme) {
   if (kind == DeviceKind::Catalog) return PickerAction::Catalog;
-  if (kind == DeviceKind::Background && hasReadme) return PickerAction::Readme;
-  return PickerAction::None;
+  return hasReadme ? PickerAction::Readme : PickerAction::None;
 }
 
 // One SD plugin folder, classified by the marker files it carries.

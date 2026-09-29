@@ -221,10 +221,17 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
     meta["filename"] = progress.metadata->filename;
     meta["title"] = progress.metadata->title;
     meta["authors"] = progress.metadata->authors;
-    for (const auto& kv : progress.metadata->extra) {
-      // Sidecar fields must not override the reserved keys above.
-      if (!meta[kv.first.c_str()].isNull()) continue;
-      meta[kv.first.c_str()] = kv.second;
+    JsonDocument extra;
+    if (!progress.metadata->extraJson.empty() &&
+        deserializeJson(extra, progress.metadata->extraJson) == DeserializationError::Ok) {
+      for (JsonPairConst kv : extra.as<JsonObjectConst>()) {
+        // Flat strings, numbers, and booleans keep their JSON type; null and
+        // nested values are skipped, and the reserved keys above always win.
+        const JsonVariantConst value = kv.value();
+        if (!(value.is<const char*>() || value.is<bool>() || value.is<long long>() || value.is<double>())) continue;
+        if (!meta[kv.key().c_str()].isNull()) continue;
+        meta[kv.key().c_str()] = value;
+      }
     }
   }
   doc["progress"] = progress.progress;

@@ -69,6 +69,12 @@ void refreshSubscriptions() {
       LOG_ERR("PEVT", "subscription table full; ignoring %s", entry.name.c_str());
       break;
     }
+    // The fixed-size table cannot hold these: a truncated name or folder would
+    // point emit() and drain() at a different outbox than the plugin's own.
+    if (entry.name.size() >= sizeof(Subscriber::name) || entry.dir.size() >= sizeof(Subscriber::dir)) {
+      LOG_ERR("PEVT", "plugin name/path too long for events; ignoring %s", entry.name.c_str());
+      continue;
+    }
     std::string raw;
     if (!Storage.readFileToString("PEVT", entry.dir + "/device.json", MAX_MANIFEST_SIZE, raw)) continue;
     // Filtered parse: only the events section, so a big manifest costs a few
@@ -94,6 +100,7 @@ void refreshSubscriptions() {
     if (mask & eventBit(Event::SleepEnter)) connectMask |= eventBit(Event::SleepEnter);
     if (mask == 0) continue;
     Subscriber& sub = subscribers[slot++];
+    // Lengths checked above, so these copy whole strings.
     strncpy(sub.name, entry.name.c_str(), sizeof(sub.name) - 1);
     strncpy(sub.dir, entry.dir.c_str(), sizeof(sub.dir) - 1);
     sub.mask = mask;
@@ -178,7 +185,13 @@ void emit(const Event e, const Var* vars, const size_t varCount) {
       if (!file || !file.isOpen()) continue;
       LOG_DBG("PEVT", "%s: outbox over cap, dropped", sub.name);
     }
-    file.write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
+    const uint64_t before = file.fileSize64();
+    if (file.write(reinterpret_cast<const uint8_t*>(line.data()), line.size()) != line.size()) {
+      // A torn line would glue the next event onto it and the drain would drop
+      // both as corrupt: cut back to the last complete line, losing only this one.
+      LOG_ERR("PEVT", "%s: short outbox append; event dropped", sub.name);
+      file.truncate(before);
+    }
     file.flush();
   }
 }
@@ -359,10 +372,17 @@ bool deliverLine(const DrainManifest& mf, const std::string& lineText, std::stri
   // A password-grant token expires; on 401/403 mint a fresh one and retry once.
   if ((status == 401 || status == 403) && mf.hasPasswordGrant()) {
     std::string minted;
+    // Same template vocabulary as the delivery request (e.g. a {cfg.*} client
+    // secret in an auth header).
+    pluginhttp::Headers authHeaders;
+    authHeaders.reserve(mf.authReq.headers.size());
+    for (const auto& h : mf.authReq.headers) {
+      authHeaders.emplace_back(h.first, drainSubstituted(h.second, token, config, meta, vars, ts, id));
+    }
     if (pluginhttp::mintPasswordToken(nullptr, drainSubstituted(mf.authReq.url, token, config, meta, vars, ts, id),
                                       mf.authReq.method,
-                                      drainSubstituted(mf.authReq.body, token, config, meta, vars, ts, id),
-                                      mf.authReq.headers, mf.authTokenPath, minted)) {
+                                      drainSubstituted(mf.authReq.body, token, config, meta, vars, ts, id), authHeaders,
+                                      mf.authTokenPath, minted)) {
       pluginhttp::saveTokenToFile(mf.tokenFile, mf.tokenPath, minted);
       token = minted;
       status = run(token);

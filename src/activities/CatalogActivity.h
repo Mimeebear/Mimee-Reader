@@ -45,9 +45,13 @@ class CatalogActivity : public UiListActivity {
 
   bool handleCustomInput() override;
   void navigateButtons() override;
-  // Idle screens (browsing a fetched feed, a settled error) may auto-sleep;
-  // anything with a connection, transfer, or child flow in progress must not.
-  bool preventAutoSleep() override { return state != State::BROWSING && state != State::ERROR; }
+  // Only work in progress keeps the device awake: a connection, fetch,
+  // transfer, sign-in poll, or child flow (Wi-Fi picker, search keyboard).
+  // Settled screens (lists, pickers, errors, done, not signed in) may auto-sleep.
+  bool preventAutoSleep() override {
+    return state == State::CHECK_WIFI || state == State::WIFI_SELECTION || state == State::SEARCH_INPUT ||
+           state == State::LOADING || state == State::DOWNLOADING || state == State::AUTH;
+  }
   static bool wifiConnected();
   void fail(StrId message);
   void beginLoading();

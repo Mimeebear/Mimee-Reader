@@ -28,6 +28,10 @@ every queued line carries a unique `id` (a per-boot nonce plus a counter, so it
 never repeats across queued events or reboots) — dedupe on `{event.id}`
 server-side if it matters.
 
+Event subscriptions need a plugin folder name of at most 23 bytes, with the
+full folder path (root included) within 63 bytes; a plugin past either limit
+is logged and not subscribed.
+
 `sleep.enter` gets special timing: it exists to act before the chip powers
 down (a fresh sleep image, a pre-sleep progress push), so the sleep path
 actively brings WiFi up to deliver it at sleep entry instead of waiting for
@@ -208,7 +212,9 @@ writer of a key wins. Use `bookfusion_id`, not `id`.
    means.
 2. **Event handlers**, via `{meta.*}` as above.
 
-Fields are flat strings/numbers with a 2KB read cap. Structured service data
+Fields are flat strings, numbers, or booleans with a 2KB read cap. KOSync
+uploads carry them with their JSON types; `{meta.*}` templates see them as
+text. Null and nested values are ignored. Structured service data
 belongs on the service's server, keyed by the id in the sidecar.
 
 ## Delivery semantics and limits

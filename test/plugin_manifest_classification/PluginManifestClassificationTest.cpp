@@ -24,3 +24,15 @@ TEST(PluginManifestClassification, BackgroundManifestWithoutReadmeStaysInPicker)
   EXPECT_EQ(PluginLocations::pickerAction(PluginLocations::DeviceKind::Background, false),
             PluginLocations::PickerAction::None);
 }
+
+TEST(PluginManifestClassification, WebOnlyPluginWithReadmeOpensInfo) {
+  EXPECT_EQ(PluginLocations::pickerAction(PluginLocations::DeviceKind::None, true),
+            PluginLocations::PickerAction::Readme);
+  EXPECT_EQ(PluginLocations::pickerAction(PluginLocations::DeviceKind::None, false),
+            PluginLocations::PickerAction::None);
+}
+
+TEST(PluginManifestClassification, CatalogOpensEvenWithReadme) {
+  EXPECT_EQ(PluginLocations::pickerAction(PluginLocations::DeviceKind::Catalog, true),
+            PluginLocations::PickerAction::Catalog);
+}

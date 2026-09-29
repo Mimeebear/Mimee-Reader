@@ -529,11 +529,14 @@ curl -X POST http://crosspoint.local/api/plugin-jobs \
 ### `GET /api/plugin-jobs/claim?plugin=<name>`
 
 Executor-side (used by the plugin host page): returns the next pending job
-`{"id":3,"action":"<action>","args":{...}}` and marks it running, or `{"id":0}`.
+`{"id":3,"claim":7,"action":"<action>","args":{...}}` and marks it running, or `{"id":0}`.
+A running job whose lease expires returns to pending and gets a new `claim` when re-claimed.
 
 ### `POST /api/plugin-jobs/complete`
 
-Executor-side: `{"id":3,"ok":true,"result":{...}}` -> `{"ok":true}`.
+Executor-side: `{"id":3,"claim":7,"ok":true,"result":{...}}` -> `{"ok":true}`. The `claim`
+must match the one from the claim response; a stale claim (the lease expired and another
+executor re-claimed the job) gets `409 {"error":"stale claim"}` and changes nothing.
 
 ### `GET /api/plugin-jobs/status?id=<n>`
 

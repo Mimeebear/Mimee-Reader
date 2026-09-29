@@ -246,8 +246,9 @@ void ReaderActivity::loop() {
     }
   } else {
     if (skip) {
+      // A skip is navigation, not reading: it never counts toward session dwell.
       const bool succeeded = skipPages(10);
-      notePageTurn(true, succeeded);
+      notePageTurn(false, succeeded);
     } else {
       const bool succeeded = pageTurn(true);
       notePageTurn(true, succeeded);

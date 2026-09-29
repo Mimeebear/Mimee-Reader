@@ -1,7 +1,6 @@
 #include "OpdsBookBrowserActivity.h"
 
 #include <Arduino.h>
-#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -229,21 +228,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // the current feed when the transfer finishes.
   releaseEntries();
 
-  // Rebuildable SD-font caches can hold tens of KB the TLS session needs for
-  // a multi-MB book; release them up front (they repopulate on demand) and
-  // refuse to start below the floor — a doomed transfer otherwise dies
-  // mid-stream with MEMORY_E, or abort()s on an interior allocation.
-  if (auto* fcm = renderer.getFontCacheManager()) {
-    fcm->releaseSdFontCaches();
-  }
-  LOG_DBG("OPDS", "Download heap: %u free, %u max block", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-  if (ESP.getFreeHeap() < HttpDownloader::MIN_TLS_FREE_HEAP ||
-      ESP.getMaxAllocHeap() < HttpDownloader::MIN_TLS_MAX_ALLOC) {
-    LOG_ERR("OPDS", "Low heap for download (%u free, %u max block)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-    fail(StrId::STR_DOWNLOAD_FAILED);
-    return;
-  }
-
+  // downloadFile() (CatalogActivity) releases font caches and checks the TLS heap floor.
   const auto result = downloadFile(downloadUrl, filename, server.username, server.password);
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);

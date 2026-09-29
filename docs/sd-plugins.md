@@ -17,12 +17,12 @@ and the firmware carries no vendor names, URLs, or file-format knowledge.
 **Discovery and the on-device list.** Every plugin folder (anything holding a
 `manifest.json`, `plugin.js`, or `device.json`) appears under **Settings →
 System → Plugins** on the reader, showing its `title` and one-line
-`description`. Selecting a plugin opens an info screen with the description and
-the plugin's `README.md` as scrollable usage instructions — so even a
-browser-only plugin (no `device.json`) is listed and can explain how to use it
-from the web UI. A plugin that ships a `device.json` also gets an **Open**
-action there to launch its on-device catalog. `title`/`description` are read
-from `manifest.json`, with `device.json` overriding when present.
+`description`. Selecting a plugin with an on-device catalog (`device.json`
+with `browse.url`) opens that catalog. Selecting any other plugin shows its
+`README.md` (up to 16KB, as plain paged text) when it has one, so even a
+browser-only plugin (no `device.json`) can explain how to use it from the web
+UI; without a README the row does nothing. `title`/`description` are read from
+`manifest.json`, with `device.json` overriding when present.
 
 `<root>` is any of `/.crosspoint/plugins`, `/plugins`, or `/.plugins` — the
 first two-dot-free options exist so plugins are easy to copy onto the card
@@ -60,7 +60,7 @@ the browser context, and posts the result back.
 |---|---|
 | `POST /api/plugin-jobs` | enqueue `{plugin, action, args?}` → `{id}` (503 when the pool is full) |
 | `GET /api/plugin-jobs/claim?plugin=` | executor claims the next pending job |
-| `POST /api/plugin-jobs/complete` | executor posts `{id, ok, result?}` |
+| `POST /api/plugin-jobs/complete` | executor posts `{id, claim, ok, result?}` (`claim` from the claim response; 409 when stale) |
 | `GET /api/plugin-jobs/status?id=` | caller polls: `{id, state, result}`; states: `pending`, `running`, `done`, `error`, `unknown` (recycled) |
 | `GET /plugins-run` | headless page that loads every plugin (UI hidden) and executes jobs while open |
 

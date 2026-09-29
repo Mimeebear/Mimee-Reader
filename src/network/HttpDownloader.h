@@ -24,6 +24,7 @@ class HttpDownloader {
     HTTP_ERROR,
     FILE_ERROR,
     ABORTED,
+    UNAUTHORIZED,  // 401/403: callers holding a refreshable credential can retry
   };
 
   // Pre-flight floor for starting a TLS transfer. Below this the session or

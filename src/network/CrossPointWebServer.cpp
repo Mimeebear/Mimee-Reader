@@ -2377,20 +2377,24 @@ void CrossPointWebServer::handlePluginJobClaim() {
     }
     if (job.state != JOB_PENDING || plugin != job.plugin) continue;
     job.state = JOB_RUNNING;
+    job.claim = nextPluginJobClaim++;
     job.updatedAt = now;
-    const std::string msg = "{\"id\":" + std::to_string(job.id) + ",\"action\":\"" + job.action +
-                            "\",\"args\":" + (job.args[0] ? job.args : "{}") + "}";
+    const std::string msg = "{\"id\":" + std::to_string(job.id) + ",\"claim\":" + std::to_string(job.claim) +
+                            ",\"action\":\"" + job.action + "\",\"args\":" + (job.args[0] ? job.args : "{}") + "}";
     server->send(200, "application/json", msg.c_str());
     return;
   }
   server->send(200, "application/json", "{\"id\":0}");
 }
 
-// POST /api/plugin-jobs/complete {id, ok, result?} -> {ok}
+// POST /api/plugin-jobs/complete {id, claim, ok, result?} -> {ok}
+// 409 when `claim` is stale: the lease expired and another runner re-claimed
+// the job, so this late result must not overwrite that runner's.
 void CrossPointWebServer::handlePluginJobComplete() {
   JsonDocument req;
   if (!readJsonBody(req)) return;
   const uint32_t id = req["id"] | 0;
+  const uint32_t claim = req["claim"] | 0;
   for (auto& job : pluginJobs) {
     if (job.id != id) continue;
     if (job.state == JOB_DONE || job.state == JOB_ERROR) {
@@ -2398,6 +2402,11 @@ void CrossPointWebServer::handlePluginJobComplete() {
       return;
     }
     if (job.state != JOB_RUNNING) break;
+    if (job.claim != claim) {
+      LOG_INF("WEB", "Plugin job %u: stale completion ignored", (unsigned)id);
+      server->send(409, "application/json", "{\"error\":\"stale claim\"}");
+      return;
+    }
     job.state = (req["ok"] | false) ? JOB_DONE : JOB_ERROR;
     job.updatedAt = millis();
     job.result[0] = '\0';
