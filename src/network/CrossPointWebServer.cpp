@@ -239,7 +239,7 @@ void CrossPointWebServer::begin() {
   server->on("/api/relay", HTTP_POST, [this] { handleRelay(); });
   server->on("/api/crypto", HTTP_POST, [this] { handleCrypto(); });
   server->on("/api/fetch", HTTP_POST, [this] { handleFetch(); });
-  server->on("/api/plugin-fs", HTTP_POST, [this] { handlePluginFs(); });
+  server->on("/api/plugin-fs", HTTP_POST, [this] { handlePluginFs(); }, [this] { handlePluginFsUpload(); });
 
   // Wi-Fi credential endpoints
   server->on("/api/wifi", HTTP_GET, [this] { handleGetWifiNetworks(); });
@@ -2145,7 +2145,7 @@ void CrossPointWebServer::handleFetch() {
   };
   const freeink::FetchResult result = freeink::fetchResumable(
       url, options,
-      [&](freeink::SecureHttpClient& http) {
+      [&](freeink::SecureHttpClient& http, const bool sameOrigin) {
         http.setUserAgent("CrossPoint");
         // The SecureNet transport ships no CA bundle, so peer verification always
         // fails (wolfSSL -188); skip it like HttpDownloader does. Traffic stays
@@ -2154,7 +2154,11 @@ void CrossPointWebServer::handleFetch() {
         // Some delivery servers assemble books on the fly and can stall mid-body
         // while packaging; the default 15s no-data timeout truncates those downloads.
         http.setTimeout(60000);
-        for (const auto& header : requestHeaders) http.addHeader(header.first, header.second);
+        // The plugin's headers (typically its Authorization) stay with the
+        // starting origin; a redirect to another server gets none of them.
+        if (sameOrigin) {
+          for (const auto& header : requestHeaders) http.addHeader(header.first, header.second);
+        }
       },
       sink,
       // The write callback only runs when bytes arrive; with the 60s no-data
@@ -2222,50 +2226,91 @@ void CrossPointWebServer::handleFetch() {
   sendFetchResult(200, out);
 }
 
-// POST /api/plugin-fs?plugin=<name>&path=<path> with the raw file contents as
-// the request body. A plugin writes a small file to SD.
+// POST /api/plugin-fs?plugin=<name>&path=<path> with the file contents as a
+// multipart file part. A plugin writes a small file to SD. Multipart, not a raw
+// body: WebServer turns a plain body into a NUL-terminated String (truncating
+// binary data) and buffers all of it first, while file parts stream in chunks.
+void CrossPointWebServer::handlePluginFsUpload() {
+  static constexpr size_t MAX_PLUGIN_FILE = 256 * 1024;
+  auto& st = pluginFsUpload;
+  const HTTPUpload& part = server->upload();
+  const auto fail = [&st](const int status, const char* error) {
+    if (st.file.isOpen()) st.file.close();  // explicit: remove follows on the same path
+    if (!st.tmp.empty()) Storage.remove(st.tmp.c_str());
+    st.errorStatus = status;
+    st.error = error;
+  };
+
+  switch (part.status) {
+    case UPLOAD_FILE_START: {
+      if (st.file.isOpen()) st.file.close();
+      st.path = server->arg("path").c_str();
+      st.tmp.clear();
+      st.bytes = 0;
+      st.started = true;
+      st.errorStatus = 0;
+      st.error = nullptr;
+      const String plugin = server->arg("plugin");
+      if (!safeComponent(plugin) || !safeWritePath(st.path)) {
+        LOG_ERR("WEB", "Rejected plugin file write: plugin='%s' path='%s'", plugin.c_str(), st.path.c_str());
+        fail(400, "bad path");
+        return;
+      }
+      // ensureDirectoryExists() creates missing parents along the way, so this
+      // covers any depth under /.crosspoint/plugins/<name>/... in one call.
+      const size_t lastSlash = st.path.rfind('/');
+      if (lastSlash != std::string::npos && lastSlash > 0) {
+        Storage.ensureDirectoryExists(st.path.substr(0, lastSlash).c_str());
+      }
+      st.tmp = st.path + ".tmp";
+      Storage.remove(st.tmp.c_str());
+      if (!Storage.openFileForWrite("PLG", st.tmp, st.file)) fail(500, "cannot write");
+      return;
+    }
+    case UPLOAD_FILE_WRITE:
+      if (st.errorStatus) return;
+      if (part.currentSize > MAX_PLUGIN_FILE - st.bytes) {
+        fail(413, "too large");
+        return;
+      }
+      resetTaskWatchdogIfSubscribed();
+      if (st.file.write(part.buf, part.currentSize) != part.currentSize) {
+        fail(500, "sd write failed");
+        return;
+      }
+      st.bytes += part.currentSize;
+      return;
+    case UPLOAD_FILE_END:
+      if (st.errorStatus) return;
+      st.file.close();
+      // An empty body must not replace existing credentials with nothing.
+      if (st.bytes == 0) {
+        fail(400, "empty body");
+      } else if (!Storage.replaceFile(st.tmp.c_str(), st.path.c_str())) {
+        fail(500, "sd write failed");
+      }
+      return;
+    case UPLOAD_FILE_ABORTED:
+      fail(400, "upload aborted");
+      return;
+  }
+}
+
 void CrossPointWebServer::handlePluginFs() {
-  if (!server->hasArg("plain")) {
-    server->send(400, "application/json", "{\"error\":\"missing body\"}");
-    return;
+  auto& st = pluginFsUpload;
+  if (!st.started) {
+    server->send(400, "application/json", "{\"error\":\"missing file part\"}");
+  } else if (st.errorStatus) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "{\"error\":\"%s\"}", st.error);
+    server->send(st.errorStatus, "application/json", msg);
+  } else {
+    JsonDocument resp;
+    resp["ok"] = true;
+    resp["bytes"] = st.bytes;
+    sendJson(resp);
   }
-  const String plugin = server->arg("plugin");
-  const std::string path = server->arg("path").c_str();
-  if (!safeComponent(plugin) || !safeWritePath(path)) {
-    LOG_ERR("WEB", "Rejected plugin file write: plugin='%s' path='%s'", plugin.c_str(), path.c_str());
-    server->send(400, "application/json", "{\"error\":\"bad path\"}");
-    return;
-  }
-
-  // Raw bytes from PluginHost; the explicit length preserves embedded NULs.
-  const String& rawData = server->arg("plain");
-  const auto* data = reinterpret_cast<const uint8_t*>(rawData.c_str());
-  const size_t dataSize = rawData.length();
-
-  // Reject empty bodies before opening, so existing credentials are not truncated.
-  if (dataSize == 0) {
-    server->send(400, "application/json", "{\"error\":\"empty body\"}");
-    return;
-  }
-  static constexpr size_t kMaxPluginFile = 256 * 1024;
-  if (dataSize > kMaxPluginFile) {
-    server->send(413, "application/json", "{\"error\":\"too large\"}");
-    return;
-  }
-
-  // ensureDirectoryExists() creates missing parents along the way, so this
-  // covers any depth under /.crosspoint/plugins/<name>/... in one call.
-  const size_t lastSlash = path.rfind('/');
-  if (lastSlash != std::string::npos && lastSlash > 0) {
-    Storage.ensureDirectoryExists(path.substr(0, lastSlash).c_str());
-  }
-  // Replaces the old file only once the new one is complete, so a failed save
-  // never truncates a plugin's stored credentials.
-  const bool ok = Storage.writeFile(path.c_str(), rawData);
-  JsonDocument resp;
-  resp["ok"] = ok;
-  resp["bytes"] = ok ? dataSize : 0;
-  sendJson(resp);
+  st.started = false;
 }
 
 void CrossPointWebServer::handlePluginRunnerPage() const {

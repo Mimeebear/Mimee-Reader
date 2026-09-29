@@ -151,6 +151,18 @@ class CrossPointWebServer {
   void handleCrypto();            // POST /api/crypto    -> generic crypto primitive (base64 I/O)
   void handleFetch();             // POST /api/fetch     -> device downloads a URL to SD
   void handlePluginFs();          // POST /api/plugin-fs -> plugin writes a small file to SD
+  void handlePluginFsUpload();    // its multipart file part, streamed to <path>.tmp
+
+  // One /api/plugin-fs write in flight: chunks land in `tmp`, which replaces
+  // `path` only after a complete, non-empty body.
+  struct PluginFsUploadState {
+    HalFile file;
+    std::string path, tmp;
+    size_t bytes = 0;
+    bool started = false;
+    int errorStatus = 0;  // non-zero: HTTP status to answer with
+    const char* error = nullptr;
+  } pluginFsUpload;
 
   // SD-plugin job queue. External systems (a companion app, a script) enqueue
   // {plugin, action, args}; any open page hosting the plugin (File Manager,

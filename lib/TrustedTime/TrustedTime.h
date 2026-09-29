@@ -33,8 +33,9 @@ void startSync();
 bool syncNow(uint32_t timeoutMs);
 
 // Epoch seconds when the clock is trustworthy (a plausible present-day
-// value, restored or synced), else 0. Callers enforcing a date fail closed
-// on 0.
+// value, restored or synced), else 0. Never earlier than a time already seen
+// this boot or restored from the floor, so a backward clock step cannot undo
+// an expiry. Callers enforcing a date fail closed on 0.
 int64_t trustedNow();
 
 }  // namespace trustedtime

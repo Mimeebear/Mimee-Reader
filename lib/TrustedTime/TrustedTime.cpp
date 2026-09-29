@@ -19,6 +19,22 @@ constexpr int64_t MIN_ADVANCE_SECS = 60;
 constexpr const char* PREFS_NAMESPACE = "cptime";
 constexpr const char* PREFS_KEY = "floor";
 
+// Latest time this boot has seen (or restored from NVS). trustedNow() never
+// reports earlier, so a backward clock step (a bad SNTP answer, a manual set)
+// cannot reopen an expired loan. Updated from the SNTP callback's lwIP task as
+// well as the main task; 64-bit atomics are not lock-free on the C3.
+int64_t ramFloor = 0;
+portMUX_TYPE ramFloorLock = portMUX_INITIALIZER_UNLOCKED;
+
+// Raises the in-RAM floor to `value` if higher; returns the resulting floor.
+int64_t raiseFloor(const int64_t value) {
+  portENTER_CRITICAL(&ramFloorLock);
+  if (value > ramFloor) ramFloor = value;
+  const int64_t floor = ramFloor;
+  portEXIT_CRITICAL(&ramFloorLock);
+  return floor;
+}
+
 int64_t readFloor() {
   Preferences prefs;
   if (!prefs.begin(PREFS_NAMESPACE, /*readOnly=*/true)) return 0;
@@ -49,6 +65,7 @@ void init() {
   sntp_set_time_sync_notification_cb(&onTimeSynced);
   const int64_t floor = readFloor();
   if (floor < MIN_VALID_EPOCH) return;
+  raiseFloor(floor);
   if (static_cast<int64_t>(time(nullptr)) < floor) {
     // Cold boot reset the clock; resume from the floor so time keeps moving
     // forward across power cycles instead of restarting at epoch 0.
@@ -61,6 +78,7 @@ void init() {
 void note() {
   const int64_t now = static_cast<int64_t>(time(nullptr));
   if (now < MIN_VALID_EPOCH) return;
+  raiseFloor(now);
   if (now - readFloor() >= MIN_ADVANCE_SECS) writeFloor(now);
 }
 
@@ -83,7 +101,9 @@ bool syncNow(const uint32_t timeoutMs) {
 
 int64_t trustedNow() {
   const int64_t now = static_cast<int64_t>(time(nullptr));
-  return now >= MIN_VALID_EPOCH ? now : 0;
+  // Never earlier than a time already seen; 0 while neither is trustworthy.
+  const int64_t floor = raiseFloor(now >= MIN_VALID_EPOCH ? now : 0);
+  return floor >= MIN_VALID_EPOCH ? floor : 0;
 }
 
 }  // namespace trustedtime

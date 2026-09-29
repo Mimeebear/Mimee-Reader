@@ -204,6 +204,8 @@ struct DrainManifest {
   bool hasPasswordGrant() const { return authType == "password" && !authReq.url.empty(); }
 };
 
+// False only when device.json cannot be read or parsed; a manifest that parses
+// but declares no runnable handlers returns true with out.handlers empty.
 bool loadDrainManifest(const Subscriber& sub, DrainManifest& out) {
   std::string raw;
   if (!Storage.readFileToString("PEVT", std::string(sub.dir) + "/device.json", MAX_MANIFEST_SIZE, raw)) return false;
@@ -242,7 +244,7 @@ bool loadDrainManifest(const Subscriber& sub, DrainManifest& out) {
     h.toast = kv.value()["toast"] | "";
     if (!h.req.url.empty()) out.handlers.push_back(std::move(h));
   }
-  return !out.handlers.empty();
+  return true;
 }
 
 // {token}, {cfg.*}, {meta.*}, and {event.*} from the queued line's vars
@@ -388,7 +390,10 @@ void drain(GfxRenderer* renderer, const size_t maxEvents) {
     if (!Storage.readFileToString("PEVT", path, MAX_OUTBOX_BYTES + MAX_EVENT_LINE, raw)) continue;
 
     DrainManifest mf;
-    if (!loadDrainManifest(sub, mf)) {
+    // Unreadable or malformed right now (SD fault, a half-written manifest):
+    // keep the queue for the next drain.
+    if (!loadDrainManifest(sub, mf)) continue;
+    if (mf.handlers.empty()) {
       // Subscribed but no runnable handlers (JS-only consumer, or manifest
       // edited away): the queue would never advance, so clear it.
       Storage.remove(path.c_str());

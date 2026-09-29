@@ -82,16 +82,15 @@
     },
     crypto(op, fields) { return this._post('/api/crypto', Object.assign({ op }, fields || {})); },
     async writeFile(plugin, path, dataB64) {
-      // Decode in the browser so the device receives one binary body.
-      // Typed-array uploads preserve embedded NULs.
+      // Decode in the browser and send the bytes as a multipart file part: the
+      // device streams file parts to SD, so embedded NULs and large bodies
+      // survive (a plain body would become a NUL-terminated string).
       const bytes = Uint8Array.from(atob(dataB64 || ''), (c) => c.charCodeAt(0));
       const url = '/api/plugin-fs?plugin=' + encodeURIComponent(plugin) +
         '&path=' + encodeURIComponent(path);
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: bytes
-      });
+      const form = new FormData();
+      form.append('file', new Blob([bytes]), 'data');
+      const r = await fetch(url, { method: 'POST', body: form });
       return this._readResponse(r, '/api/plugin-fs');
     },
     async fetchToSd(plugin, url, dest, headers) {

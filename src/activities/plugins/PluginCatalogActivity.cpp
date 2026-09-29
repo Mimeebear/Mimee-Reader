@@ -698,15 +698,17 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBundle(const Item& 
   std::string base = item.base;
   if (!base.empty() && base.back() != '/') base += '/';
   const size_t total = item.files.size();
-  // Written files, for rollback: a half-installed bundle folder would show
-  // up as a broken plugin/theme in the next discovery scan.
-  std::vector<std::string> written;
-  written.reserve(total);
+  // Every file downloads to <dest>.new first and replaces <dest> only once the
+  // whole bundle has arrived, so a failed or cancelled update leaves the
+  // installed plugin/theme as it was (a half-installed folder would show up
+  // broken in the next discovery scan).
+  std::vector<std::string> staged;  // final destinations with a complete .new
+  staged.reserve(total);
   bool complete = false;
   ScopedCleanup rollback{[&] {
     if (complete) return;
-    for (const auto& path : written) Storage.remove(path.c_str());
-    Storage.rmdir(dir.c_str());  // only succeeds when the folder emptied out
+    for (const auto& path : staged) Storage.remove((path + ".new").c_str());
+    Storage.rmdir(dir.c_str());  // only succeeds when the folder is empty (a fresh install)
   }};
   for (size_t i = 0; i < total; i++) {
     std::string rel = item.files[i];
@@ -724,12 +726,22 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBundle(const Item& 
       const std::string parent = dest.substr(0, slash);
       if (!Storage.exists(parent.c_str())) Storage.mkdir(parent.c_str());
     }
-    const auto result = downloadFile(base + rel, dest);
+    const auto result = downloadFile(base + rel, dest + ".new");
     if (result != HttpDownloader::OK) return result;
-    written.push_back(dest);
+    staged.push_back(dest);
+  }
+  // ponytail: a failed swap mid-loop leaves a mixed old/new bundle; a
+  // directory-level swap would close that, at the cost of copying the tree.
+  for (size_t i = 0; i < staged.size(); i++) {
+    if (!Storage.replaceFile((staged[i] + ".new").c_str(), staged[i].c_str())) {
+      LOG_ERR("PCAT", "bundle swap failed: %s", staged[i].c_str());
+      for (size_t j = i; j < staged.size(); j++) Storage.remove((staged[j] + ".new").c_str());
+      complete = true;  // already-swapped files stay; the rollback must not touch them
+      return HttpDownloader::FILE_ERROR;
+    }
   }
   complete = true;
-  emitBookDownloaded(manifestPath, written.empty() ? "" : written.front(), item.title);
+  emitBookDownloaded(manifestPath, staged.empty() ? "" : staged.front(), item.title);
   // Bundles are how plugins install (plugin-store); pick up any new event
   // subscriptions without a restart. Cheap: a few small manifest reads.
   pluginevents::refreshSubscriptions();

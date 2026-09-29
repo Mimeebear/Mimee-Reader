@@ -31,15 +31,19 @@ HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::st
   options.redirectToHttp = downgradeRedirectsToHttp;
   const freeink::FetchResult result = freeink::fetchResumable(
       url, options,
-      [&](freeink::SecureHttpClient& http) {
+      [&](freeink::SecureHttpClient& http, const bool sameOrigin) {
         http.setTimeout(HTTP_TIMEOUT_MS);
         http.setInsecure();
         // setUserAgent replaces SecureHttpClient's built-in UA; addHeader would
         // append a second User-Agent header, which strict servers reject (aiohttp
         // answers 400 "Duplicate 'User-Agent' header found").
         http.setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
-        if (!username.empty() && !password.empty()) http.setBasicAuth(username, password);
-        for (const auto& h : headers) http.addHeader(h.first, h.second);
+        // Credentials and caller headers stay with the starting origin; a
+        // redirect elsewhere (or to plain http) gets neither.
+        if (sameOrigin) {
+          if (!username.empty() && !password.empty()) http.setBasicAuth(username, password);
+          for (const auto& h : headers) http.addHeader(h.first, h.second);
+        }
         LOG_DBG("HTTP", "wolfSSL GET: %s (heap %u, max block %u)", url.c_str(), (unsigned)ESP.getFreeHeap(),
                 (unsigned)ESP.getMaxAllocHeap());
       },
