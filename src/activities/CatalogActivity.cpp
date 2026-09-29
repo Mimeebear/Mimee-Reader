@@ -17,7 +17,6 @@ void CatalogActivity::onEnter() {
   UiListActivity::onEnter();
   app.on(ACTION_SEARCH, &CatalogActivity::onSearchEvent, this);
   app.on(ACTION_CANCEL, &CatalogActivity::onCancelEvent, this);
-  app.on(ACTION_BACK, &CatalogActivity::onBackEvent, this);
 }
 
 void CatalogActivity::onExit() {
@@ -101,24 +100,19 @@ void CatalogActivity::onCancelEvent(const freeink::ui::ActionEvent&, void* user)
   self->cancelDownload = true;
 }
 
-void CatalogActivity::onBackEvent(const freeink::ui::ActionEvent&, void* user) {
-  auto* self = static_cast<CatalogActivity*>(user);
-  if (!self->isListState()) return;
-  self->app.clearTapFlash();
-  self->onBackButton();
-}
-
 bool CatalogActivity::handleCustomInput() {
   if (state == State::WIFI_SELECTION || state == State::SEARCH_INPUT || state == State::DOWNLOADING) return true;
   if (state == State::ERROR) {
+    // Back first: a header back tap is also a screen tap, which means Retry here.
     int x = 0, y = 0;
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(x, y)) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      onBackButton();
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(x, y)) {
       if (wifiConnected())
         retryBrowse();
       else
         launchWifiSelection();
-    } else if (mappedInput.wasReleased(MappedInputManager::Button::Back))
-      onBackButton();
+    }
     return true;
   }
   if (state == State::CHECK_WIFI || state == State::LOADING) {
@@ -197,12 +191,9 @@ void CatalogActivity::finishDownload(const HttpDownloader::DownloadError result)
 
 void CatalogActivity::screenHeader(UiScreen& screen, const char* title) {
   const bool search = state == State::BROWSING && hasSearch();
-  // Only list states route header back taps; loading/download/status headers
-  // stay passive.
-  const bool back = isListState() && mappedInput.hasTouch();
   catalogScreenHeader(screen, renderer, title,
                       search ? freeink::ui::bitmapFromIcon(icon_search_32) : freeink::ui::BitmapRef{},
-                      search ? ACTION_SEARCH : freeink::ui::NO_ACTION, back ? ACTION_BACK : freeink::ui::NO_ACTION);
+                      search ? ACTION_SEARCH : freeink::ui::NO_ACTION);
 }
 
 bool CatalogActivity::buildStatusScreen(UiScreen& screen, const bool boldError, const bool showDownloadTotal) {

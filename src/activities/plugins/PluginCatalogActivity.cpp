@@ -199,6 +199,8 @@ bool PluginCatalogActivity::loadManifest() {
   JsonVariantConst dl = doc["download"];
   pluginhttp::readRequest(dl, "GET", manifest.downloadReq);
   manifest.dlUrlPath = dl["url_path"] | "";
+  manifest.dlUser = dl["username"] | "";
+  manifest.dlPass = dl["password"] | "";
   manifest.destDir = dl["dest_dir"] | "";
   manifest.filenameTpl = dl["filename"] | "{title}.epub";
   // Multi-file bundle install (generic): base URL + a files array per item.
@@ -782,7 +784,8 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBook(const Item& it
                                                               ? substitutedHeaders(manifest.downloadReq.headers, &item)
                                                               : std::vector<HttpDownloader::Header>{};
   session.reset();  // free browse TLS before the large file GET
-  const auto result = downloadFile(fileUrl, dest, {}, {}, fileHeaders);
+  const auto result = downloadFile(fileUrl, dest, substituted(manifest.dlUser, &item),
+                                   substituted(manifest.dlPass, &item), fileHeaders);
   if (result != HttpDownloader::OK) return result;
   clearBookCache(dest);
 
@@ -826,15 +829,16 @@ bool PluginCatalogActivity::handleCustomInput() {
   }
 
   if (state == State::NO_TOKEN) {
+    // Back first: a header back tap is also a screen tap, which means sign in here.
     int tx = 0;
     int ty = 0;
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(tx, ty)) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      exitCatalog();
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(tx, ty)) {
       if (!wifiConnected())
         launchWifiSelection();
       else
         retryBrowse();
-    } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-      exitCatalog();
     }
     return true;
   }

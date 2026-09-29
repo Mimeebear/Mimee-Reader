@@ -11,13 +11,12 @@ class GfxRenderer;
 // button hints, centered status/message blocks, a download-progress screen,
 // and centered status messages.
 
-// Draw the unified themed header (status band, title, rule) and reserve the
-// button-hint band below the content. A trailing icon (e.g. search) and a
-// back action become header buttons.
+// Draw the unified themed header (status band, title, rule, and a back button
+// on touch boards) and reserve the button-hint band below the content. A
+// trailing icon (e.g. search) becomes a header button.
 void catalogScreenHeader(UiAppHost::UiScreen& screen, const GfxRenderer& renderer, const char* title,
                          const freeink::ui::BitmapRef& trailingIcon = {},
-                         freeink::ui::ActionId trailingAction = freeink::ui::NO_ACTION,
-                         freeink::ui::ActionId backAction = freeink::ui::NO_ACTION);
+                         freeink::ui::ActionId trailingAction = freeink::ui::NO_ACTION);
 
 // One line of a centered message block; bold marks a heading line.
 struct CatalogLine {

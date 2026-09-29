@@ -2,16 +2,19 @@
 
 #include <FreeInkUIIcon.h>
 #include <GfxRenderer.h>
+#include <HalGPIO.h>
 #include <I18n.h>
 
+#include <algorithm>
+
+#include "HeaderBackTapTarget.h"
 #include "UITheme.h"
 #include "icons/headerIcons.h"
 
 namespace fui = freeink::ui;
 
 void catalogScreenHeader(UiAppHost::UiScreen& screen, const GfxRenderer& renderer, const char* title,
-                         const fui::BitmapRef& trailingIcon, const fui::ActionId trailingAction,
-                         const fui::ActionId backAction) {
+                         const fui::BitmapRef& trailingIcon, const fui::ActionId trailingAction) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto& theme = screen.theme();
   fui::HeaderProps header;
@@ -20,9 +23,18 @@ void catalogScreenHeader(UiAppHost::UiScreen& screen, const GfxRenderer& rendere
   // Same battery/clock band as every GUI.drawHeader screen; the header
   // heights are unified across themes, so the buttons derive from the band.
   GUI.applyHeaderStatus(renderer, header);
-  if (backAction != fui::NO_ACTION) {
+  const auto frameRect = screen.frame().screen();
+  // Back button on touch boards, as on every GUI.drawHeader screen: the rect
+  // goes to HeaderBackTapTarget, which MappedInputManager folds into
+  // Button::Back, so each page's own Back handling applies (leaving a list,
+  // cancelling a download). The action id only makes the header paint the
+  // button; no screen registers it.
+  if (gpio.hasTouch()) {
+    static constexpr fui::ActionId PAINT_ONLY_BACK = 0xFFFF;
     header.leadingIcon = fui::bitmapFromIcon(icon_header_back_32);
-    header.leadingAction = backAction;
+    header.leadingAction = PAINT_ONLY_BACK;
+    HeaderBackTapTarget::set(frameRect.x + 4, metrics.topPadding + 4 + header.actionOffsetY, header.leadingSize,
+                             header.leadingSize);
   }
   if (trailingIcon && trailingAction != fui::NO_ACTION) {
     header.trailingIcon = trailingIcon;
@@ -38,7 +50,6 @@ void catalogScreenHeader(UiAppHost::UiScreen& screen, const GfxRenderer& rendere
   header.trailingStyles = fui::plainStyles(fui::Paint::solid(fui::Color::Black));
   header.sidePadding = theme.headerSidePadding;
   header.minTouchSize = theme.minTouchSize;
-  const auto frameRect = screen.frame().screen();
   fui::header(screen.frame(),
               fui::Rect{frameRect.x, static_cast<int16_t>(metrics.topPadding), frameRect.width,
                         static_cast<int16_t>(metrics.headerHeight)},
@@ -49,20 +60,32 @@ void catalogScreenHeader(UiAppHost::UiScreen& screen, const GfxRenderer& rendere
 }
 
 void catalogCenteredBlock(UiAppHost::UiScreen& screen, const std::initializer_list<CatalogLine> lines) {
-  fui::TextStyle centered = screen.theme().bodyText;
-  centered.align = fui::TextAlign::Center;
-  const int16_t lh = screen.target().lineHeight(centered.font);
-  const int16_t gap = screen.theme().spaceMd;
   const int count = static_cast<int>(lines.size());
   if (count == 0) return;
-  const int16_t blockH = static_cast<int16_t>(lh * count + gap * (count - 1));
+  // Long lines (sign-in hints, server errors) wrap instead of clipping.
+  fui::TextStyle centered = screen.theme().bodyText;
+  centered.align = fui::TextAlign::Center;
+  centered.maxLines = 4;
+  const int16_t gap = screen.theme().spaceMd;
+  const int16_t pad = static_cast<int16_t>(UITheme::getInstance().getMetrics().contentSidePadding);
+  const int16_t width = static_cast<int16_t>(screen.body().width - 2 * pad);
+  const auto styleOf = [&](const CatalogLine& line) {
+    fui::TextStyle style = centered;
+    style.bold = line.bold;
+    return style;
+  };
+  const auto heightOf = [&](const CatalogLine& line) {
+    const int16_t h = fui::measureWrappedText(screen.target(), line.text ? line.text : "", styleOf(line), width).height;
+    return std::max(h, screen.target().lineHeight(centered.font));
+  };
+  int blockH = gap * (count - 1);
+  for (const CatalogLine& line : lines) blockH += heightOf(line);
   const fui::Rect body = screen.body();
   if (body.height > blockH) screen.spacer(static_cast<int16_t>((body.height - blockH) / 2));
   int i = 0;
   for (const CatalogLine& line : lines) {
-    fui::TextStyle style = centered;
-    style.bold = line.bold;
-    screen.target().text(screen.takeTop(lh, ++i < count ? gap : 0), line.text ? line.text : "", style);
+    const fui::Rect rect = screen.takeTop(heightOf(line), ++i < count ? gap : 0).inset(fui::Insets{0, pad, 0, pad});
+    screen.target().text(rect, line.text ? line.text : "", styleOf(line));
   }
 }
 

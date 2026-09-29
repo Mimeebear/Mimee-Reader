@@ -80,6 +80,8 @@ class PluginCatalogActivity final : public CatalogActivity {
     // Empty dlUrlPath means a direct URL; otherwise resolve it through an API hop.
     pluginhttp::RequestSpec downloadReq;
     std::string dlUrlPath;
+    // Optional HTTP Basic credentials for the file GET (webdav); templates.
+    std::string dlUser, dlPass;
     std::string destDir, filenameTpl;
     // Bundle item fields: base URL and relative paths, installed under destDir/subdir.
     std::string bundleBasePath, bundleFilesPath, bundleSubdir;
