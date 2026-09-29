@@ -18,10 +18,13 @@
 #include <base64.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
+#include <wolfssl/wolfcrypt/aes.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
+#include <string_view>
 
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
@@ -1880,11 +1883,6 @@ void CrossPointWebServer::handleRelay() {
 }
 
 namespace {
-// Thin std::string adapters over the Arduino base64 encoder HttpDownloader
-// already links; crypto payloads are small, so the transient String is fine.
-std::string b64encode(const uint8_t* data, size_t len) { return base64::encode(data, len).c_str(); }
-std::string b64encode(const std::vector<uint8_t>& v) { return b64encode(v.data(), v.size()); }
-
 // A destination path is safe to write if it is absolute and has no parent refs.
 bool safeWritePath(const std::string& p) { return p.size() > 1 && p[0] == '/' && p.find("..") == std::string::npos; }
 }  // namespace
@@ -1896,7 +1894,11 @@ void CrossPointWebServer::handleCrypto() {
   using namespace freeink::content;
   JsonDocument req;
   if (!readJsonBody(req)) return;
-  const std::string op = req["op"] | "";
+  const std::string_view op = req["op"] | "";
+  const auto sendOom = [this](const char* operation) {
+    LOG_ERR("WEB", "OOM: crypto %s", operation);
+    server->send(503, "application/json", "{\"error\":\"out of memory\"}");
+  };
   struct Bytes {
     std::unique_ptr<uint8_t[]> data;
     size_t size = 0;
@@ -1910,6 +1912,7 @@ void CrossPointWebServer::handleCrypto() {
   // must fail the op, not abort() the device (-fno-exceptions). The cap keeps
   // a LAN client from posting a multi-megabyte value; crypto inputs (keys,
   // certs, PKCS#12 bundles) are a few KB.
+  bool decodeOom = false;
   auto dec = [&](const char* field) {
     static constexpr size_t MAX_CRYPTO_FIELD = 64 * 1024;
     Bytes out;
@@ -1918,73 +1921,112 @@ void CrossPointWebServer::handleCrypto() {
     if (encodedLen == 0 || encodedLen > MAX_CRYPTO_FIELD) return out;
     const size_t cap = encodedLen * 3 / 4 + 3;
     out.data = makeUniqueNoThrow<uint8_t[]>(cap);
+    if (!out.data) decodeOom = true;
     const int32_t n = out.data ? base64Decode(v, encodedLen, out.data.get(), cap) : -1;
     out.size = n < 0 ? 0 : static_cast<size_t>(n);
     return out;
   };
 
   JsonDocument resp;
+  bool encodeFailed = false;
+  const auto setEncoded = [&](const char* name, const uint8_t* data, size_t size) {
+    const uint8_t empty = 0;
+    if (size == 0) data = &empty;
+    const String encoded = base64::encode(data, size);
+    if ((size && encoded.isEmpty()) || encoded == "-FAIL-") {
+      encodeFailed = true;
+      return;
+    }
+    resp[name] = encoded;
+  };
+  const auto setEncodedVector = [&](const char* name, const std::vector<uint8_t>& data) {
+    setEncoded(name, data.data(), data.size());
+  };
 
   WolfsslCrypto c;
 
   if (op == "random") {
     static constexpr int MAX_RANDOM_BYTES = 4096;  // generous for keys/salts/tokens; blocks a runaway allocation
     const int n = std::clamp(static_cast<int>(req["len"] | 16), 0, MAX_RANDOM_BYTES);
-    std::vector<uint8_t> out(n);
-    if (!out.empty()) c.randomBytes(out.data(), out.size());
-    resp["data"] = b64encode(out);
+    auto out = makeUniqueNoThrow<uint8_t[]>(n);
+    if (n && !out) {
+      sendOom("random output");
+      return;
+    }
+    if (n) c.randomBytes(out.get(), n);
+    const uint8_t empty = 0;
+    setEncoded("data", n ? out.get() : &empty, n);
   } else if (op == "sha1") {
     const Bytes d = dec("data");
+    if (decodeOom) return sendOom("input");
     uint8_t h[20];
     c.sha1(d.ptr(), d.size, h);
-    resp["data"] = b64encode(h, 20);
+    setEncoded("data", h, 20);
   } else if (op == "aesenc" || op == "aesdec") {
     const Bytes k = dec("key"), iv = dec("iv"), d = dec("data");
+    if (decodeOom) return sendOom("input");
     if (k.size != 16 || iv.size != 16) {
       resp["error"] = "key/iv must be 16 bytes";
     } else if (op == "aesenc") {
-      std::vector<uint8_t> out(((d.size / 16) + 1) * 16);
-      if (c.aes128CbcEncrypt(k.ptr(), iv.ptr(), d.ptr(), d.size, out.data()))
-        resp["data"] = b64encode(out);
+      const size_t outSize = ((d.size / 16) + 1) * 16;
+      auto out = makeUniqueNoThrow<uint8_t[]>(outSize);
+      // Pad inside the output buffer; the SDK helper allocates a second copy.
+      auto aes = makeUniqueNoThrow<Aes>();
+      if (!out || !aes) return sendOom("AES output");
+      memcpy(out.get(), d.ptr(), d.size);
+      memset(out.get() + d.size, static_cast<int>(outSize - d.size), outSize - d.size);
+      if (wc_AesSetKey(aes.get(), k.ptr(), 16, iv.ptr(), AES_ENCRYPTION) == 0 &&
+          wc_AesCbcEncrypt(aes.get(), out.get(), out.get(), outSize) == 0)
+        setEncoded("data", out.get(), outSize);
       else
         resp["error"] = "aesenc failed";
     } else if (d.size % 16 != 0) {
       resp["error"] = "data not block-aligned";
     } else {
-      std::vector<uint8_t> out(d.size);
-      if (c.aes128CbcDecrypt(k.ptr(), iv.ptr(), d.ptr(), d.size, out.data()))
-        resp["data"] = b64encode(out);
+      auto out = makeUniqueNoThrow<uint8_t[]>(d.size);
+      if (d.size && !out) {
+        return sendOom("AES output");
+      }
+      uint8_t empty = 0;
+      if (c.aes128CbcDecrypt(k.ptr(), iv.ptr(), d.ptr(), d.size, d.size ? out.get() : &empty))
+        setEncoded("data", d.size ? out.get() : &empty, d.size);
       else
         resp["error"] = "aesdec failed";
     }
   } else if (op == "keygen") {
     RsaKeyPairDer kp;
     if (c.rsaGenerate(&kp)) {
-      resp["public"] = b64encode(kp.spki);
-      resp["private"] = b64encode(kp.pkcs8);
+      setEncodedVector("public", kp.spki);
+      setEncodedVector("private", kp.pkcs8);
     } else {
       resp["error"] = "keygen failed: " + c.lastError;
     }
   } else if (op == "pubencrypt") {
     const Bytes cert = dec("cert"), d = dec("data");
-    std::vector<uint8_t> out(512);  // off the stack; RSA output up to 4096-bit
+    if (decodeOom) return sendOom("input");
+    auto out = makeUniqueNoThrow<uint8_t[]>(512);  // off the stack; RSA output up to 4096-bit
+    if (!out) {
+      return sendOom("RSA output");
+    }
     size_t olen = 0;
-    if (c.rsaPublicEncrypt(cert.ptr(), cert.size, d.ptr(), d.size, out.data(), out.size(), &olen))
-      resp["data"] = b64encode(out.data(), olen);
+    if (c.rsaPublicEncrypt(cert.ptr(), cert.size, d.ptr(), d.size, out.get(), 512, &olen))
+      setEncoded("data", out.get(), olen);
     else
       resp["error"] = "pubencrypt failed: " + c.lastError + " (cert " + std::to_string(cert.size) + "B, data " +
                       std::to_string(d.size) + "B)";
   } else if (op == "sign") {
     const Bytes priv = dec("private"), h = dec("hash");
+    if (decodeOom) return sendOom("input");
     uint8_t sig[128];
     if (h.size != 20)
       resp["error"] = "hash must be 20 bytes";
     else if (c.rsaPrivateSignRaw(priv.ptr(), priv.size, h.ptr(), sig))
-      resp["data"] = b64encode(sig, 128);
+      setEncoded("data", sig, 128);
     else
       resp["error"] = "sign failed";
   } else if (op == "pkcs12") {
     const Bytes p12 = dec("data");
+    if (decodeOom) return sendOom("input");
     const std::string pw = req["password"] | "";
     // The decoded bundle no longer depends on the request document. Reclaim
     // its large base64 string before the KDF and certificate parsing begin.
@@ -1993,8 +2035,8 @@ void CrossPointWebServer::handleCrypto() {
     if (p12.size == 0) {
       resp["error"] = "pkcs12 failed: bundle missing, invalid, or out of memory";
     } else if (c.pkcs12Extract(p12.ptr(), p12.size, pw, &key, &cert)) {
-      resp["key"] = b64encode(key);
-      resp["cert"] = b64encode(cert);
+      setEncodedVector("key", key);
+      setEncodedVector("cert", cert);
     } else {
       resp["error"] = "pkcs12 failed: " + c.lastError;
     }
@@ -2002,6 +2044,9 @@ void CrossPointWebServer::handleCrypto() {
     resp["error"] = "unknown op";
   }
 
+  if (encodeFailed || resp.overflowed()) {
+    return sendOom("response");
+  }
   sendJson(resp);
 }
 
