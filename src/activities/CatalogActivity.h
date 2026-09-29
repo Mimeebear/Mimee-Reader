@@ -48,6 +48,7 @@ class CatalogActivity : public UiListActivity {
     return state == State::BROWSING || state == State::PLUGIN_PICKER || state == State::LIST_PICKER;
   }
   bool handleCustomInput() override;
+  void navigateButtons() override;
   // Idle screens (browsing a fetched feed, a settled error) may auto-sleep;
   // anything with a connection, transfer, or child flow in progress must not.
   bool preventAutoSleep() override { return state != State::BROWSING && state != State::ERROR; }
@@ -72,6 +73,7 @@ class CatalogActivity : public UiListActivity {
   void onDownloadProgress(size_t downloaded, size_t total);
   // Download input consumes home gestures before ActivityManager sees them.
   bool goHomeAfterCancel = false;
+  bool searchPending = false;  // NavPrevious pressed on a searchable top row
   int lastRenderedPercent = -1;
   unsigned long lastProgressUpdateMs = 0;
 };

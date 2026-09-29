@@ -125,12 +125,25 @@ bool CatalogActivity::handleCustomInput() {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) onBackButton();
     return true;
   }
-  if (state == State::BROWSING && hasSearch() && nav.selected == 0 &&
-      mappedInput.wasReleased(MappedInputManager::Button::NavPrevious)) {
+  // Previous on a searchable list's top row opens search on release. Lists
+  // move on press, so latch that press instead of stepping; holding still
+  // pages (navigateButtons() drops the latch when the selection moves).
+  if (mappedInput.wasPressed(MappedInputManager::Button::NavPrevious)) {
+    searchPending = state == State::BROWSING && hasSearch() && nav.selected == 0;
+    return searchPending;
+  }
+  if (searchPending && mappedInput.wasReleased(MappedInputManager::Button::NavPrevious)) {
+    searchPending = false;
     launchSearch();
     return true;
   }
   return false;
+}
+
+void CatalogActivity::navigateButtons() {
+  const int before = nav.selected;
+  UiListActivity::navigateButtons();
+  if (nav.selected != before) searchPending = false;
 }
 
 void CatalogActivity::beginDownload(const std::string& title) {
