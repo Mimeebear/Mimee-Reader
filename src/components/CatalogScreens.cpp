@@ -6,6 +6,7 @@
 #include <I18n.h>
 
 #include <algorithm>
+#include <numeric>
 
 #include "HeaderBackTapTarget.h"
 #include "UITheme.h"
@@ -78,8 +79,8 @@ void catalogCenteredBlock(UiAppHost::UiScreen& screen, const std::initializer_li
     const int16_t h = fui::measureWrappedText(screen.target(), line.text ? line.text : "", styleOf(line), width).height;
     return std::max(h, screen.target().lineHeight(centered.font));
   };
-  int blockH = gap * (count - 1);
-  for (const CatalogLine& line : lines) blockH += heightOf(line);
+  const int blockH = std::accumulate(lines.begin(), lines.end(), gap * (count - 1),
+                                     [&](const int sum, const CatalogLine& line) { return sum + heightOf(line); });
   const fui::Rect body = screen.body();
   if (body.height > blockH) screen.spacer(static_cast<int16_t>((body.height - blockH) / 2));
   int i = 0;
