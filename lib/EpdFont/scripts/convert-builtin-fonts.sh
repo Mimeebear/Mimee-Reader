@@ -74,7 +74,7 @@ for size in ${UI_FONT_SIZES[@]}; do
     # Thai UI glyphs, so it is used as the last fallback for Thai characters
     # instead of the SD-card reader font path.
     viet_path="../builtinFonts/source/Ubuntu/Ubuntu-Vietnamese-${style}.ttf"
-    thai_path="../builtinFonts/source/NotoSans/NotoSans-${style}.ttf"
+    thai_path="../builtinFonts/source/GoogleSans/GoogleSans-${style}.ttf"
     output_path="../builtinFonts/${font_name}.h"
     python fontconvert.py $font_name $size $font_path $hebrew_path $arabic_path $viet_path $thai_path \
       --additional-intervals 0x05D0,0x05EA --additional-intervals 0x0E00,0x0E7F "${ARABIC_INTERVALS[@]}" > $output_path
@@ -86,6 +86,7 @@ python fontconvert.py notosans_8_regular 8 \
   ../builtinFonts/source/NotoSans/NotoSans-Regular.ttf \
   ../builtinFonts/source/NotoSansHebrew/NotoSansHebrew-Regular.ttf \
   ../builtinFonts/source/NotoSansArabic/NotoSansArabic-Regular.ttf \
+  ../builtinFonts/source/GoogleSans/GoogleSans-Regular.ttf \
   --additional-intervals 0x05D0,0x05EA --additional-intervals 0x0E00,0x0E7F "${ARABIC_INTERVALS[@]}" > ../builtinFonts/notosans_8_regular.h
 
 echo ""
