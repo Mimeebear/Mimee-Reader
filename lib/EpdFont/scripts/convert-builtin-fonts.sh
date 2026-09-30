@@ -70,11 +70,14 @@ for size in ${UI_FONT_SIZES[@]}; do
     # Ubuntu lacks the Latin Extended Additional block (U+1EA0-U+1EF9) used for
     # Vietnamese tone marks. Append a Vietnamese-only Ubuntu cut so those glyphs
     # are filled from it while every glyph Ubuntu already has stays unchanged
-    # (fontstack is ordered by descending priority).
+    # (fontstack is ordered by descending priority). Likewise, Noto Sans covers
+    # Thai UI glyphs, so it is used as the last fallback for Thai characters
+    # instead of the SD-card reader font path.
     viet_path="../builtinFonts/source/Ubuntu/Ubuntu-Vietnamese-${style}.ttf"
+    thai_path="../builtinFonts/source/NotoSans/NotoSans-${style}.ttf"
     output_path="../builtinFonts/${font_name}.h"
-    python fontconvert.py $font_name $size $font_path $hebrew_path $arabic_path $viet_path \
-      --additional-intervals 0x05D0,0x05EA "${ARABIC_INTERVALS[@]}" > $output_path
+    python fontconvert.py $font_name $size $font_path $hebrew_path $arabic_path $viet_path $thai_path \
+      --additional-intervals 0x05D0,0x05EA --additional-intervals 0x0E00,0x0E7F "${ARABIC_INTERVALS[@]}" > $output_path
     echo "Generated $output_path"
   done
 done
@@ -83,7 +86,7 @@ python fontconvert.py notosans_8_regular 8 \
   ../builtinFonts/source/NotoSans/NotoSans-Regular.ttf \
   ../builtinFonts/source/NotoSansHebrew/NotoSansHebrew-Regular.ttf \
   ../builtinFonts/source/NotoSansArabic/NotoSansArabic-Regular.ttf \
-  --additional-intervals 0x05D0,0x05EA "${ARABIC_INTERVALS[@]}" > ../builtinFonts/notosans_8_regular.h
+  --additional-intervals 0x05D0,0x05EA --additional-intervals 0x0E00,0x0E7F "${ARABIC_INTERVALS[@]}" > ../builtinFonts/notosans_8_regular.h
 
 echo ""
 echo "Running compression verification..."
