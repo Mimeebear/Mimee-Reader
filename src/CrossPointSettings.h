@@ -6,6 +6,7 @@
 
 #include <cstdint>
 
+#include "I18nKeys.h"
 #include "util/HomeButtonInput.h"
 
 class CrossPointSettings : public PersistableStore<CrossPointSettings> {
@@ -329,7 +330,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Focus Reading - emphasizes the first part of words with bold
   uint8_t focusReadingEnabled = 0;
   uint8_t readerMenuStyle = READER_MENU_LIST;
-  // SD card font family name (empty = use built-in fontFamily)
+  // SD card font family name (empty = use built-in fontFamily).
   char sdFontFamilyName[32] = "";
   // Dictionary folder name under /dictionaries (empty = no dictionary)
   char dictionaryName[32] = "";
@@ -365,8 +366,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Restore the saved on/off state after a normal boot or wake. Brightness and
   // warmth are always remembered even when this is disabled.
   uint8_t frontlightRestoreOnWake = 1;
-  // Language setting (Language enum index, default 0 = EN)
-  uint8_t language = 0;
+  // Language setting (Language enum index, default to Thai so the UI launches in Thai).
+  uint8_t language = static_cast<uint8_t>(Language::TH);
   // Keyboard layouts the user can reach, using keyboard_layouts::ALL table bits.
   // 0 means "not configured", resolved to the UI language's layout plus English.
   // Any other value is an explicit choice and is used as-is: the language of the
