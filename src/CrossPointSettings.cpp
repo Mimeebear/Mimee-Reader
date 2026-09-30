@@ -239,7 +239,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   strncpy(sdFontFamilyName, sfn, sizeof(sdFontFamilyName) - 1);
   sdFontFamilyName[sizeof(sdFontFamilyName) - 1] = '\0';
   if (storedFontFamily == LEGACY_OPENDYSLEXIC && sdFontFamilyName[0] == '\0') {
-    fontFamily = NOTOSERIF;
+    fontFamily = SARABUN;
     strncpy(sdFontFamilyName, "OpenDyslexic", sizeof(sdFontFamilyName) - 1);
     sdFontFamilyName[sizeof(sdFontFamilyName) - 1] = '\0';
     needsResave = true;
@@ -324,7 +324,7 @@ float CrossPointSettings::getReaderLineCompression() const {
   }
 
   switch (fontFamily) {
-    case NOTOSERIF:
+    case SARABUN:
     default:
       switch (lineSpacing) {
         case TIGHT:
@@ -403,13 +403,13 @@ int CrossPointSettings::getReaderFontId() const {
   const bool sans = (fontFamily == NOTOSANS);
   switch (pt) {
     case 12:
-      return sans ? NOTOSANS_12_FONT_ID : NOTOSERIF_12_FONT_ID;
+      return sans ? NOTOSANS_12_FONT_ID : SARABUN_12_FONT_ID;
     case 16:
-      return sans ? NOTOSANS_16_FONT_ID : NOTOSERIF_16_FONT_ID;
+      return sans ? NOTOSANS_16_FONT_ID : SARABUN_16_FONT_ID;
     case 18:
-      return sans ? NOTOSANS_18_FONT_ID : NOTOSERIF_18_FONT_ID;
+      return sans ? NOTOSANS_18_FONT_ID : SARABUN_18_FONT_ID;
     case 14:
     default:
-      return sans ? NOTOSANS_14_FONT_ID : NOTOSERIF_14_FONT_ID;
+      return sans ? NOTOSANS_14_FONT_ID : SARABUN_14_FONT_ID;
   }
 }

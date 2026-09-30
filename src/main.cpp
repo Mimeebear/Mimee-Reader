@@ -69,31 +69,31 @@ constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
 static bool wakePowerReleasePending = false;
 
 // Fonts
-EpdFont notoserif14RegularFont(&notoserif_14_regular);
-EpdFont notoserif14BoldFont(&notoserif_14_bold);
-EpdFont notoserif14ItalicFont(&notoserif_14_italic);
-EpdFont notoserif14BoldItalicFont(&notoserif_14_bolditalic);
-EpdFontFamily notoserif14FontFamily(&notoserif14RegularFont, &notoserif14BoldFont, &notoserif14ItalicFont,
-                                    &notoserif14BoldItalicFont);
+EpdFont sarabun14RegularFont(&sarabun_14_regular);
+EpdFont sarabun14BoldFont(&sarabun_14_bold);
+EpdFont sarabun14ItalicFont(&sarabun_14_italic);
+EpdFont sarabun14BoldItalicFont(&sarabun_14_bolditalic);
+EpdFontFamily sarabun14FontFamily(&sarabun14RegularFont, &sarabun14BoldFont, &sarabun14ItalicFont,
+                                 &sarabun14BoldItalicFont);
 #ifndef OMIT_FONTS
-EpdFont notoserif12RegularFont(&notoserif_12_regular);
-EpdFont notoserif12BoldFont(&notoserif_12_bold);
-EpdFont notoserif12ItalicFont(&notoserif_12_italic);
-EpdFont notoserif12BoldItalicFont(&notoserif_12_bolditalic);
-EpdFontFamily notoserif12FontFamily(&notoserif12RegularFont, &notoserif12BoldFont, &notoserif12ItalicFont,
-                                    &notoserif12BoldItalicFont);
-EpdFont notoserif16RegularFont(&notoserif_16_regular);
-EpdFont notoserif16BoldFont(&notoserif_16_bold);
-EpdFont notoserif16ItalicFont(&notoserif_16_italic);
-EpdFont notoserif16BoldItalicFont(&notoserif_16_bolditalic);
-EpdFontFamily notoserif16FontFamily(&notoserif16RegularFont, &notoserif16BoldFont, &notoserif16ItalicFont,
-                                    &notoserif16BoldItalicFont);
-EpdFont notoserif18RegularFont(&notoserif_18_regular);
-EpdFont notoserif18BoldFont(&notoserif_18_bold);
-EpdFont notoserif18ItalicFont(&notoserif_18_italic);
-EpdFont notoserif18BoldItalicFont(&notoserif_18_bolditalic);
-EpdFontFamily notoserif18FontFamily(&notoserif18RegularFont, &notoserif18BoldFont, &notoserif18ItalicFont,
-                                    &notoserif18BoldItalicFont);
+EpdFont sarabun12RegularFont(&sarabun_12_regular);
+EpdFont sarabun12BoldFont(&sarabun_12_bold);
+EpdFont sarabun12ItalicFont(&sarabun_12_italic);
+EpdFont sarabun12BoldItalicFont(&sarabun_12_bolditalic);
+EpdFontFamily sarabun12FontFamily(&sarabun12RegularFont, &sarabun12BoldFont, &sarabun12ItalicFont,
+                                  &sarabun12BoldItalicFont);
+EpdFont sarabun16RegularFont(&sarabun_16_regular);
+EpdFont sarabun16BoldFont(&sarabun_16_bold);
+EpdFont sarabun16ItalicFont(&sarabun_16_italic);
+EpdFont sarabun16BoldItalicFont(&sarabun_16_bolditalic);
+EpdFontFamily sarabun16FontFamily(&sarabun16RegularFont, &sarabun16BoldFont, &sarabun16ItalicFont,
+                                  &sarabun16BoldItalicFont);
+EpdFont sarabun18RegularFont(&sarabun_18_regular);
+EpdFont sarabun18BoldFont(&sarabun_18_bold);
+EpdFont sarabun18ItalicFont(&sarabun_18_italic);
+EpdFont sarabun18BoldItalicFont(&sarabun_18_bolditalic);
+EpdFontFamily sarabun18FontFamily(&sarabun18RegularFont, &sarabun18BoldFont, &sarabun18ItalicFont,
+                                  &sarabun18BoldItalicFont);
 
 EpdFont notosans12RegularFont(&notosans_12_regular);
 EpdFont notosans12BoldFont(&notosans_12_bold);
@@ -325,11 +325,11 @@ void setupDisplayAndFonts(bool seamless = false) {
   }
   fontCacheManager.setFontDecompressor(&fontDecompressor);
   renderer.setFontCacheManager(&fontCacheManager);
-  renderer.insertFont(NOTOSERIF_14_FONT_ID, notoserif14FontFamily);
+  renderer.insertFont(SARABUN_14_FONT_ID, sarabun14FontFamily);
 #ifndef OMIT_FONTS
-  renderer.insertFont(NOTOSERIF_12_FONT_ID, notoserif12FontFamily);
-  renderer.insertFont(NOTOSERIF_16_FONT_ID, notoserif16FontFamily);
-  renderer.insertFont(NOTOSERIF_18_FONT_ID, notoserif18FontFamily);
+  renderer.insertFont(SARABUN_12_FONT_ID, sarabun12FontFamily);
+  renderer.insertFont(SARABUN_16_FONT_ID, sarabun16FontFamily);
+  renderer.insertFont(SARABUN_18_FONT_ID, sarabun18FontFamily);
 
   renderer.insertFont(NOTOSANS_12_FONT_ID, notosans12FontFamily);
   renderer.insertFont(NOTOSANS_14_FONT_ID, notosans14FontFamily);
