@@ -140,6 +140,20 @@ TEST(ThaiTrieSegmentation, UnknownWordWrapsAtClusterBoundaryWithoutHyphen) {
   EXPECT_EQ(wordsOf(lines), expected);
 }
 
+TEST(ThaiTrieSegmentation, MixedThaiTokenDoesNotGetInsertedHyphen) {
+  Hyphenator::setPreferredLanguage("th");
+  const auto lines = layout({"ภาษาabc"}, true, 48);
+  const std::vector<std::vector<std::string>> expected{{"ภาษา"}, {"abc"}};
+  EXPECT_EQ(wordsOf(lines), expected);
+}
+
+TEST(ThaiTrieSegmentation, EnglishFallbackStillInsertsHyphen) {
+  Hyphenator::setPreferredLanguage("th");
+  const auto lines = layout({"abcdef"}, true, 40);
+  const std::vector<std::vector<std::string>> expected{{"abcd-"}, {"ef"}};
+  EXPECT_EQ(wordsOf(lines), expected);
+}
+
 TEST(KoreanLineBreaking, HyphenationOffWrapsAtSpacesOnly) {
   Hyphenator::setPreferredLanguage("ko");
   // 가나 다라마바 needs 52 px; with hyphenation off the Hangul word moves down whole.

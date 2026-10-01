@@ -1240,9 +1240,7 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   const bool hasThai = ThaiWordBreaker::containsThai(word);
   const auto hyphenBreaks = Hyphenator::breakOffsets(word, allowFallbackBreaks);
   for (const auto& info : hyphenBreaks) {
-    if (hasThai && info.requiresInsertedHyphen && ThaiWordBreaker::boundaryTouchesThai(word, info.byteOffset)) {
-      continue;
-    }
+    if (hasThai && info.requiresInsertedHyphen) continue;
     breakInfos.push_back(info);
   }
 
