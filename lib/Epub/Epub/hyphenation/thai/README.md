@@ -4,5 +4,6 @@
 `libthai-data`. The serialized trie is 588,096 bytes and uses the libdatrie
 0.2.13 format.
 
-The dictionary and any code ported from libthai or libdatrie are covered by
-LGPL-2.1-or-later. See `COPYING.LGPL-2.1` and `AUTHORS`.
+The LGPL-2.1-or-later files are `thbrk.tri`, the ported `ThaiWordBreaker.cpp`,
+and generated `ThaiWordTrieData.cpp` (which embeds the trie and its flash index).
+See `COPYING.LGPL-2.1` and `AUTHORS`.

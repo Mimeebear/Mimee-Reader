@@ -17,6 +17,7 @@
 #include "TokenBoundary.h"
 #include "hyphenation/HyphenationCommon.h"
 #include "hyphenation/Hyphenator.h"
+#include "hyphenation/thai/ThaiWordBreaker.h"
 
 constexpr int MAX_COST = std::numeric_limits<int>::max();
 
@@ -1236,34 +1237,57 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   // annotation, so the hyphenator sees the whole word and every legal break is reachable.
   // Hangul breaks come first so they win a tie against a hyphenated break at the same width.
   auto breakInfos = hangulLineEndBreaks(word);
+  const bool hasThai = ThaiWordBreaker::containsThai(word);
   const auto hyphenBreaks = Hyphenator::breakOffsets(word, allowFallbackBreaks);
-  breakInfos.insert(breakInfos.end(), hyphenBreaks.begin(), hyphenBreaks.end());
-  if (breakInfos.empty()) {
-    return false;
+  for (const auto& info : hyphenBreaks) {
+    if (hasThai && info.requiresInsertedHyphen && ThaiWordBreaker::boundaryTouchesThai(word, info.byteOffset)) {
+      continue;
+    }
+    breakInfos.push_back(info);
   }
 
   size_t chosenOffset = 0;
   int chosenWidth = -1;
   bool chosenNeedsHyphen = true;
 
-  // Iterate over each legal breakpoint and retain the widest prefix that still fits.
-  for (const auto& info : breakInfos) {
-    const size_t offset = info.byteOffset;
+  const auto considerBreakpoint = [&](const size_t offset, const bool needsHyphen) {
     if (offset == 0 || offset >= word.size()) {
-      continue;
+      return;
     }
 
-    const bool needsHyphen = info.requiresInsertedHyphen;
     const int prefixWidth = measureFocusWordWidth(renderer, fontId, word.substr(0, offset), style,
                                                   focusBoundaryBefore(focusBoundary, offset),
                                                   blockStyle.characterSpacing, wordSpacingPercent, needsHyphen);
     if (prefixWidth > availableWidth || prefixWidth <= chosenWidth) {
-      continue;  // Skip if too wide or not an improvement
+      return;
     }
 
     chosenWidth = prefixWidth;
     chosenOffset = offset;
     chosenNeedsHyphen = needsHyphen;
+  };
+
+  // Existing language-specific breaks retain their original behavior.
+  for (const auto& info : breakInfos) {
+    considerBreakpoint(info.byteOffset, info.requiresInsertedHyphen);
+  }
+
+  // Thai boundaries stream from flash; no second boundary-offset buffer is built.
+  if (hasThai) {
+    const auto* const wordBytes = reinterpret_cast<const unsigned char*>(word.data());
+    const auto* const wordEnd = wordBytes + word.size();
+    const unsigned char* ptr = wordBytes;
+    while (ptr < wordEnd) {
+      const unsigned char* const codepointStart = ptr;
+      const uint32_t cp = utf8NextCodepoint(&ptr);
+      if (!ThaiWordBreaker::isThaiCodepoint(cp)) continue;
+
+      const size_t startByte = static_cast<size_t>(codepointStart - wordBytes);
+      const size_t breakOffset = ThaiWordBreaker::nextBoundary(word, startByte);
+      if (breakOffset <= startByte || breakOffset > word.size()) break;
+      considerBreakpoint(breakOffset, /*needsHyphen=*/true);
+      ptr = wordBytes + breakOffset;
+    }
   }
 
   if (chosenWidth < 0) {
