@@ -1285,7 +1285,7 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
       const size_t startByte = static_cast<size_t>(codepointStart - wordBytes);
       const size_t breakOffset = ThaiWordBreaker::nextBoundary(word, startByte);
       if (breakOffset <= startByte || breakOffset > word.size()) break;
-      considerBreakpoint(breakOffset, /*needsHyphen=*/true);
+      considerBreakpoint(breakOffset, /*needsHyphen=*/false);
       ptr = wordBytes + breakOffset;
     }
   }

@@ -120,14 +120,23 @@ TEST(ThaiTrieSegmentation, UnknownTextFallsBackAtThaiClusters) {
 TEST(ThaiTrieSegmentation, LineLayoutUsesTrieWhenHyphenationIsDisabled) {
   Hyphenator::setPreferredLanguage("th");
   const auto lines = layout({"ภาษาไทย"}, false, 40);
-  const std::vector<std::vector<std::string>> expected{{"ภาษา-"}, {"ไทย"}};
+  const std::vector<std::vector<std::string>> expected{{"ภาษา"}, {"ไทย"}};
   EXPECT_EQ(wordsOf(lines), expected);
 }
 
 TEST(ThaiTrieSegmentation, LineLayoutUsesTrieWhenHyphenationIsEnabled) {
   Hyphenator::setPreferredLanguage("th");
   const auto lines = layout({"ภาษาไทย"}, true, 40);
-  const std::vector<std::vector<std::string>> expected{{"ภาษา-"}, {"ไทย"}};
+  const std::vector<std::vector<std::string>> expected{{"ภาษา"}, {"ไทย"}};
+  EXPECT_EQ(wordsOf(lines), expected);
+}
+
+TEST(ThaiTrieSegmentation, UnknownWordWrapsAtClusterBoundaryWithoutHyphen) {
+  Hyphenator::setPreferredLanguage("th");
+  const std::string unknown = "\xE0\xB8\x81\xE0\xB8\xB4\xE0\xB9\x88\xE0\xB8\x82";
+  const auto lines = layout({unknown.c_str()}, false, 24);
+  const std::vector<std::vector<std::string>> expected{{"\xE0\xB8\x81\xE0\xB8\xB4\xE0\xB9\x88"},
+                                                       {"\xE0\xB8\x82"}};
   EXPECT_EQ(wordsOf(lines), expected);
 }
 
