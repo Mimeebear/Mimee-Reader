@@ -710,6 +710,7 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   int lastBaseTop = 0;
   int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
   thaiMark::StackState thaiStack;
+  bool thaiTallBase = false;
 
   if (fontCacheManager_ && fontCacheManager_->isScanning()) {
     fontCacheManager_->recordText(renderedText, resolvedFontId, style);
@@ -776,7 +777,11 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
 
     const EpdGlyph* glyph = font.getGlyph(cp, style);
 
+    int thaiShiftX = 0;
     int thaiRaiseBy = 0;
+    if (!isThaiCodepoint || !thaiMark::isMark(cp)) {
+      thaiTallBase = isThaiCodepoint && (cp == 0x0E1B || cp == 0x0E1D || cp == 0x0E1F || cp == 0x0E2C);
+    }
     const bool isThaiStackCandidate = thaiMark::isUpperStackMark(cp) || isThaiTone || cp == 0x0E33;
     if (glyph && isThaiStackCandidate) {
       int nextGlyphTop = 0;
@@ -786,6 +791,9 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
       }
       thaiRaiseBy = thaiStack.raiseFor(cp, glyph->top, glyph->height, nextThaiCodepoint, nextGlyphTop);
       thaiStack.observe(cp, glyph->top, thaiRaiseBy);
+      if (isThaiTone && thaiTallBase && thaiRaiseBy == 0 && cp >= 0x0E48 && cp <= 0x0E4B) {
+        thaiShiftX = (glyph->width * 3) / 4;
+      }
     }
 
     lastBaseLeft = glyph ? glyph->left : 0;
@@ -802,9 +810,9 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
 
     if (isSupSub) {
       // yPos already carries the vertical offset applied by TextBlock::render().
-      renderCharScaled(*this, renderMode, font, cp, lastBaseX, yPos - thaiRaiseBy, black, style);
+      renderCharScaled(*this, renderMode, font, cp, lastBaseX - thaiShiftX, yPos - thaiRaiseBy, black, style);
     } else {
-      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, lastBaseX, yPos - thaiRaiseBy, black, style);
+      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, lastBaseX - thaiShiftX, yPos - thaiRaiseBy, black, style);
     }
     prevCp = cp;
   }
