@@ -17,6 +17,56 @@ using combiningMark::anchorOver;
 using combiningMark::anchorOverRotated90CW;
 using combiningMark::raiseAboveBase;
 
+TEST(ThaiMarkStack, ClassifiesUpperMarksAndToneMarks) {
+  for (const uint32_t cp : {0x0E31, 0x0E34, 0x0E35, 0x0E36, 0x0E37, 0x0E38, 0x0E39, 0x0E3A, 0x0E47, 0x0E48,
+                            0x0E49, 0x0E4A, 0x0E4B, 0x0E4C, 0x0E4D, 0x0E4E}) {
+    EXPECT_TRUE(thaiMark::isMark(cp));
+  }
+  EXPECT_FALSE(thaiMark::isMark(0x0E33));  // Sara Am retains its normal advance.
+  EXPECT_TRUE(thaiMark::isUpperStackMark(0x0E36));
+  EXPECT_TRUE(thaiMark::isToneOrThanthakhat(0x0E48));
+  EXPECT_TRUE(thaiMark::isToneOrThanthakhat(0x0E4C));
+  EXPECT_FALSE(thaiMark::isToneOrThanthakhat(0x0E47));
+}
+
+TEST(ThaiMarkStack, RaisesOnlyWhenAboveMarkBoxesWouldOverlap) {
+  EXPECT_EQ(thaiMark::raiseAbovePrevious(0, 26, 6), 0);
+  EXPECT_EQ(thaiMark::raiseAbovePrevious(27, 26, 6), 8);
+  EXPECT_EQ(thaiMark::raiseAbovePrevious(30, 26, 6), 11);
+}
+
+TEST(ThaiMarkStack, CoversReportedThaiSequencesUsingSarabunMetrics) {
+  // top/height values are from the generated Sarabun 14 regular EpdGlyph records.
+  thaiMark::StackState stack;
+  EXPECT_EQ(stack.raiseFor(0x0E48, 26, 6, 0x0E33, 26), 7);  // คว่ำ: mai ek before Sara Am.
+
+  stack.reset();
+  stack.observe(0x0E36, 26, 0);
+  EXPECT_EQ(stack.raiseFor(0x0E49, 28, 8, 0x0E33, 30), 11);  // Keep the higher Sara Am obstacle.
+
+  stack.reset();
+  stack.observe(0x0E31, 27, 0);
+  EXPECT_EQ(stack.raiseFor(0x0E49, 28, 8, 0, 0), 8);  // ครั้ง: mai han-akat + mai tho.
+
+  stack.reset();
+  stack.observe(0x0E36, 27, 0);
+  EXPECT_EQ(stack.raiseFor(0x0E48, 26, 6, 0, 0), 8);  // หนึ่ง: sara ue + mai ek.
+
+  stack.reset();
+  EXPECT_EQ(stack.raiseFor(0x0E48, 26, 6, 0, 0), 0);  // ก่อน: no upper vowel.
+
+  stack.reset();
+  EXPECT_EQ(stack.raiseFor(0x0E49, 28, 8, 0x0E33, 26), 7);  // น้ำ: mai tho before Sara Am.
+
+  stack.reset();
+  stack.observe(0x0E39, -2, 8);  // ผู้: sara u is below the baseline, not an upper-stack anchor.
+  EXPECT_EQ(stack.raiseFor(0x0E49, 28, 8, 0, 0), 0);
+
+  stack.reset();
+  stack.observe(0x0E35, 28, 0);
+  EXPECT_EQ(stack.raiseFor(0x0E48, 26, 6, 0, 0), 9);  // ปี่: sara ii + mai ek.
+}
+
 TEST(AnchorFor, PositionSensitiveNiqqud) {
   EXPECT_EQ(anchorFor(0x05BC), Anchor::CenterNative);  // dagesh/mapiq
   EXPECT_EQ(anchorFor(0x05BA), Anchor::CenterNative);  // holam haser for vav

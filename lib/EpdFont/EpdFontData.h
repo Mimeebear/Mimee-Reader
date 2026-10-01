@@ -108,6 +108,55 @@ constexpr int raiseAboveBase(const Anchor anchor, const int markTop, const int m
 
 }  // namespace combiningMark
 
+namespace thaiMark {
+
+constexpr bool isMark(const uint32_t cp) {
+  return cp == 0x0E31 || (cp >= 0x0E34 && cp <= 0x0E3A) || (cp >= 0x0E47 && cp <= 0x0E4E);
+}
+
+constexpr bool isUpperStackMark(const uint32_t cp) {
+  return cp == 0x0E31 || (cp >= 0x0E34 && cp <= 0x0E37) || cp == 0x0E47 || cp == 0x0E4D || cp == 0x0E4E;
+}
+
+constexpr bool isToneOrThanthakhat(const uint32_t cp) { return cp >= 0x0E48 && cp <= 0x0E4C; }
+
+constexpr int raiseAbovePrevious(const int previousTopDistance, const int markTop, const int markHeight) {
+  const int raise = previousTopDistance + markHeight + 1 - markTop;
+  return raise > 0 ? raise : 0;
+}
+
+class StackState {
+  int topDistance = 0;
+  bool hasTop = false;
+
+ public:
+  void reset() {
+    topDistance = 0;
+    hasTop = false;
+  }
+
+  int raiseFor(const uint32_t cp, const int markTop, const int markHeight, const uint32_t nextCp,
+               const int nextGlyphTop) const {
+    if (!isUpperStackMark(cp) && !isToneOrThanthakhat(cp)) return 0;
+    int obstacleTop = topDistance;
+    bool hasObstacle = hasTop;
+    if (isToneOrThanthakhat(cp) && nextCp == 0x0E33 && (!hasObstacle || nextGlyphTop > obstacleTop)) {
+      obstacleTop = nextGlyphTop;
+      hasObstacle = true;
+    }
+    return hasObstacle ? raiseAbovePrevious(obstacleTop, markTop, markHeight) : 0;
+  }
+
+  void observe(const uint32_t cp, const int markTop, const int raise) {
+    if (!isUpperStackMark(cp) && !isToneOrThanthakhat(cp) && cp != 0x0E33) return;
+    const int newTopDistance = markTop + raise;
+    if (!hasTop || newTopDistance > topDistance) topDistance = newTopDistance;
+    hasTop = true;
+  }
+};
+
+}  // namespace thaiMark
+
 /// GCC/Clang (the ESP32 firmware toolchain) pack structs with __attribute__((packed)).
 /// MSVC (host unit tests) has no equivalent attribute and instead needs a #pragma pack
 /// region achieving the same 1-byte alignment. These macros keep the on-disk font layout
