@@ -188,10 +188,13 @@ inline std::vector<StrId> buildLongPressMenuValues() {
 }
 
 inline std::vector<StrId> homeThemeValues() {
-  static constexpr StrId VALUES[] = {StrId::STR_THEME_CLASSIC, StrId::STR_THEME_LYRA, StrId::STR_THEME_LYRA_EXTENDED,
-                                     StrId::STR_THEME_ROUNDEDRAFF, StrId::STR_THEME_COVER_GRID};
-  const size_t count = UITheme::supportsCoverGrid() ? std::size(VALUES) : std::size(VALUES) - 1;
-  return {VALUES, VALUES + count};
+  // Neko is always last. Without PSRAM it takes the slot Cover Grid would
+  // have had (index 4); setTheme() maps that value to Neko on those devices.
+  std::vector<StrId> values = {StrId::STR_THEME_CLASSIC, StrId::STR_THEME_LYRA, StrId::STR_THEME_LYRA_EXTENDED,
+                               StrId::STR_THEME_ROUNDEDRAFF};
+  if (UITheme::supportsCoverGrid()) values.push_back(StrId::STR_THEME_COVER_GRID);
+  values.push_back(StrId::STR_THEME_NEKO);
+  return values;
 }
 
 // Shared settings list used by both the device settings UI and the web settings API.
