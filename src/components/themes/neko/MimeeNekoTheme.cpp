@@ -56,6 +56,12 @@ void drawMasked(const GfxRenderer& renderer, const int x, const int y, const int
 }
 }  // namespace
 
+int MimeeNekoTheme::homeCoverThumbHeight(const GfxRenderer& renderer) const {
+  // Thumbs are at least as wide as the slot (same rule as Lyra3Covers); the draw crops the overflow.
+  const auto g = MimeeNekoLayout::compute(renderer.getScreenWidth(), 0);
+  return std::max(MimeeNekoLayout::BOOK_H, g.book[0].width * 5 / 3 + 2);
+}
+
 void MimeeNekoTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                          const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
                                          bool& bufferRestored, std::function<bool()> storeCoverBuffer) const {
@@ -96,7 +102,7 @@ void MimeeNekoTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const
       renderer.drawRect(b.x, b.y, b.width, b.height, true);
       if (!hasCover) {
         // No cover: show the title inside the empty rectangle.
-        const auto lines = renderer.wrappedText(SMALL_FONT_ID, recentBooks[i].title.c_str(), b.width - 12, 5);
+        const auto lines = renderer.wrappedText(SMALL_FONT_ID, recentBooks[i].title.c_str(), b.width - 12, 7);
         const int lh = renderer.getLineHeight(SMALL_FONT_ID);
         int y = b.y + 10;
         for (const auto& line : lines) {
@@ -131,6 +137,13 @@ void MimeeNekoTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const
     }
     if (!authorLines.empty()) {
       renderer.drawText(SMALL_FONT_ID, textX, y + 4, authorLines[0].c_str(), true);
+    }
+    // One-line small-font title of the same book in the strip under the frame.
+    const auto stripLines = renderer.wrappedText(SMALL_FONT_ID, shown.title.c_str(), g.strip.width - 24, 1);
+    if (!stripLines.empty()) {
+      const int tw = renderer.getTextWidth(SMALL_FONT_ID, stripLines[0].c_str());
+      const int sy = g.strip.y + (g.strip.height - renderer.getLineHeight(SMALL_FONT_ID)) / 2;
+      renderer.drawText(SMALL_FONT_ID, g.strip.x + (g.strip.width - tw) / 2, sy, stripLines[0].c_str(), true);
     }
   }
 }
