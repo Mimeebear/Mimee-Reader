@@ -489,16 +489,9 @@ void HomeActivity::loop() {
       requestUpdate();
     };
     const auto moveHorizontal = [&](const int dir) {
-      const int sel = selectorIndex;
-      if (sel < bookCount) {
-        const int rowStart = (sel / MimeeNekoLayout::COLS) * MimeeNekoLayout::COLS;
-        const int rowCount = std::min(MimeeNekoLayout::COLS, bookCount - rowStart);
-        selectorIndex = rowStart + (sel - rowStart + rowCount + dir) % rowCount;
-      } else if (iconCount > 0) {
-        selectorIndex = bookCount + (sel - bookCount + iconCount + dir) % iconCount;
-      } else {
-        return;
-      }
+      // Reading order across the whole home: books 1..6, then the icons; wraps at the ends.
+      if (menuCount <= 0) return;
+      selectorIndex = (selectorIndex + dir + menuCount) % menuCount;
       requestUpdate();
     };
     buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up}, [&] { moveVertical(-1); });
