@@ -1,5 +1,6 @@
 #include "MimeeNekoTheme.h"
 
+#include <Bitmap.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 
