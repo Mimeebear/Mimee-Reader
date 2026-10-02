@@ -283,6 +283,8 @@ class BaseTheme {
   virtual void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth, bool cursorMode = false,
                              int contentStartX = 0, int contentWidth = 0) const;
   virtual bool showsFileIcons() const { return false; }
+  // True for the Mimee Neko 3x2 book-grid home (HomeActivity switches navigation/touch on it).
+  virtual bool hasNekoGridHome() const { return false; }
   // Thumb generation height for home covers; 0 means use metrics.homeCoverHeight.
   // Themes with slots wider than 0.6 aspect override this so covers still fill.
   virtual int homeCoverThumbHeight(const GfxRenderer&) const { return 0; }

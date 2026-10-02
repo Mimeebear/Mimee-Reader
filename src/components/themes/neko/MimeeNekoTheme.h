@@ -66,4 +66,5 @@ class MimeeNekoTheme : public LyraTheme {
                       const std::function<std::string(int index)>& buttonLabel,
                       const std::function<UIIcon(int index)>& rowIcon) const override;
   int homeCoverThumbHeight(const GfxRenderer&) const override { return MimeeNekoLayout::BOOK_H; }
+  bool hasNekoGridHome() const override { return true; }
 };

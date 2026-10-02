@@ -23,6 +23,7 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#include "components/themes/neko/MimeeNekoTheme.h"
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
@@ -329,7 +330,7 @@ void HomeActivity::loop() {
 
   // Cover grid home splits navigation by button group (see below); the flat
   // next/previous cycle is for the classic list home only.
-  if (!coverGridUi) {
+  if (!coverGridUi && !GUI.hasNekoGridHome()) {
     buttonNavigator.onNext([this, menuCount] {
       selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
       requestUpdate();
@@ -397,6 +398,113 @@ void HomeActivity::loop() {
     buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right}, [&cycleBand, bookCount, menuCount] {
       cycleBand(bookCount, menuCount - bookCount, +1);
     });
+    return;
+  }
+
+  if (GUI.hasNekoGridHome()) {
+    // Neko home: 3x2 book grid, then the icon bar. selectorIndex stays flat
+    // (books first, then icons); Up/Down move between rows and the bar,
+    // Left/Right move along the current row.
+    const int bookCount = static_cast<int>(recentBooks.size());
+    const int iconCount = menuCount - bookCount;
+    const auto geo = MimeeNekoLayout::compute(renderer.getScreenWidth(), metrics.homeTopPadding);
+
+    for (int r = 0; r < MimeeNekoLayout::ROWS; ++r) {
+      int col = -1;
+      const Rect& first = geo.cell[r * MimeeNekoLayout::COLS];
+      const auto t = mappedInput.colTouch(col, first.x, first.width, MimeeNekoLayout::COLS, first.y,
+                                          first.y + first.height, first.width);
+      if (t == MappedInputManager::RowTouch::None) continue;
+      const int idx = r * MimeeNekoLayout::COLS + col;
+      if (idx < bookCount) {
+        if (t == MappedInputManager::RowTouch::Down) {
+          if (selectorIndex != idx) {
+            selectorIndex = idx;
+            requestUpdate();
+          }
+        } else {
+          selectorIndex = idx;
+          activateSelection();
+        }
+      }
+      return;
+    }
+
+    if (iconCount > 0) {
+      int icon = -1;
+      const auto t = mappedInput.colTouch(icon, geo.bar.x, geo.bar.width / iconCount, iconCount, geo.bar.y - 8,
+                                          geo.bar.y + geo.bar.height + 8, 0);
+      if (t != MappedInputManager::RowTouch::None) {
+        const int idx = bookCount + icon;
+        if (t == MappedInputManager::RowTouch::Down) {
+          if (selectorIndex != idx) {
+            selectorIndex = idx;
+            requestUpdate();
+          }
+        } else {
+          selectorIndex = idx;
+          activateSelection();
+        }
+        return;
+      }
+    }
+
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      activateSelection();
+      return;
+    }
+
+    const auto iconFromCol = [iconCount](const int c) {
+      return std::min(iconCount - 1, (2 * c + 1) * iconCount / (2 * MimeeNekoLayout::COLS));
+    };
+    const auto colFromIcon = [iconCount](const int j) {
+      return std::min(MimeeNekoLayout::COLS - 1, (2 * j + 1) * MimeeNekoLayout::COLS / (2 * iconCount));
+    };
+    const auto moveVertical = [&](const int dir) {
+      const int sel = selectorIndex;
+      if (sel < bookCount) {
+        const int r = sel / MimeeNekoLayout::COLS;
+        const int c = sel % MimeeNekoLayout::COLS;
+        if (dir > 0 && r == 0 && sel + MimeeNekoLayout::COLS < bookCount) {
+          selectorIndex = sel + MimeeNekoLayout::COLS;
+        } else if (dir < 0 && r > 0) {
+          selectorIndex = sel - MimeeNekoLayout::COLS;
+        } else if (iconCount > 0) {
+          selectorIndex = bookCount + iconFromCol(c);  // leave the grid for the icon bar
+        } else {
+          return;
+        }
+      } else {
+        if (bookCount == 0) return;
+        const int c = colFromIcon(sel - bookCount);
+        if (dir > 0) {
+          selectorIndex = c < bookCount ? c : 0;  // wrap to the top row
+        } else {
+          int idx = c + MimeeNekoLayout::COLS;  // bottom-most book in this column
+          if (idx >= bookCount) idx = c;
+          if (idx >= bookCount) idx = bookCount - 1;
+          selectorIndex = idx;
+        }
+      }
+      requestUpdate();
+    };
+    const auto moveHorizontal = [&](const int dir) {
+      const int sel = selectorIndex;
+      if (sel < bookCount) {
+        const int rowStart = (sel / MimeeNekoLayout::COLS) * MimeeNekoLayout::COLS;
+        const int rowCount = std::min(MimeeNekoLayout::COLS, bookCount - rowStart);
+        selectorIndex = rowStart + (sel - rowStart + rowCount + dir) % rowCount;
+      } else if (iconCount > 0) {
+        selectorIndex = bookCount + (sel - bookCount + iconCount + dir) % iconCount;
+      } else {
+        return;
+      }
+      requestUpdate();
+    };
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up}, [&] { moveVertical(-1); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Down}, [&] { moveVertical(+1); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left}, [&] { moveHorizontal(-1); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right}, [&] { moveHorizontal(+1); });
     return;
   }
 
@@ -532,8 +640,9 @@ void HomeActivity::render(RenderLock&&) {
       [&menuItems](int index) { return std::string(menuItems[index]); },
       [&menuIcons](int index) { return menuIcons[index]; });
 
-  const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), tr(STR_DIR_UP),
-                                            tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT),
+                                            GUI.hasNekoGridHome() ? tr(STR_DIR_LEFT) : tr(STR_DIR_UP),
+                                            GUI.hasNekoGridHome() ? tr(STR_DIR_RIGHT) : tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
