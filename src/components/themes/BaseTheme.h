@@ -285,6 +285,8 @@ class BaseTheme {
   virtual bool showsFileIcons() const { return false; }
   // True for the Mimee Neko 3x2 book-grid home (HomeActivity switches navigation/touch on it).
   virtual bool hasNekoGridHome() const { return false; }
+  // True for the Mimee Bookshelf home (3x2 covers + selected-book row).
+  virtual bool hasBookshelfHome() const { return false; }
   // Thumb generation height for home covers; 0 means use metrics.homeCoverHeight.
   // Themes with slots wider than 0.6 aspect override this so covers still fill.
   virtual int homeCoverThumbHeight(const GfxRenderer&) const { return 0; }

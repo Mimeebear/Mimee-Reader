@@ -508,6 +508,7 @@ STR_TOGGLE_FRONTLIGHT: "Toggle Frontlight"
 
 STR_THEME_COVER_GRID: "Cover Grid"
 STR_THEME_NEKO: "Mimee Neko"
+STR_THEME_BOOKSHELF: "Mimee Bookshelf"
 STR_WORD_SPACING: "Word spacing"
 STR_CHARACTER_SPACING: "Character spacing"
 STR_SPACING_MINUS_2: "-2 px"

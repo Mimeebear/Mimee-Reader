@@ -194,6 +194,7 @@ inline std::vector<StrId> homeThemeValues() {
                                StrId::STR_THEME_ROUNDEDRAFF};
   if (UITheme::supportsCoverGrid()) values.push_back(StrId::STR_THEME_COVER_GRID);
   values.push_back(StrId::STR_THEME_NEKO);
+  values.push_back(StrId::STR_THEME_BOOKSHELF);
   return values;
 }
 

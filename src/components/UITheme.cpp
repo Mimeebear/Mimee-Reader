@@ -16,6 +16,7 @@
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
+#include "components/themes/bookshelf/MimeeBookshelfTheme.h"
 #include "components/themes/neko/MimeeNekoTheme.h"
 #include "components/themes/roundedraff/RoundedRaffTheme.h"
 
@@ -38,7 +39,14 @@ bool UITheme::hasCoverGridHome() { return SETTINGS.uiTheme == CrossPointSettings
 void UITheme::drawCoverGridHome(CoverGridHomeUi& home) { home.renderUi(); }
 
 void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
-  if (type == CrossPointSettings::COVER_GRID && !supportsCoverGrid()) type = CrossPointSettings::NEKO;
+  if (!supportsCoverGrid()) {
+    // No PSRAM: the list has no Cover Grid entry, so the stored values 4 and 5 mean Neko and Bookshelf.
+    if (type == CrossPointSettings::COVER_GRID) {
+      type = CrossPointSettings::NEKO;
+    } else if (type == CrossPointSettings::NEKO) {
+      type = CrossPointSettings::BOOKSHELF;
+    }
+  }
 
   switch (type) {
     case CrossPointSettings::UI_THEME::CLASSIC:
@@ -64,6 +72,17 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
       currentTheme = std::make_unique<RoundedRaffTheme>();
       currentMetrics = &RoundedRaffMetrics::values;
       break;
+    case CrossPointSettings::UI_THEME::BOOKSHELF: {
+      auto theme = makeUniqueNoThrow<MimeeBookshelfTheme>();
+      if (!theme) {
+        LOG_ERR("UI", "OOM: Bookshelf theme");
+        return;
+      }
+      currentTheme = std::move(theme);
+      currentMetrics = &MimeeBookshelfMetrics::values;
+      LOG_DBG("UI", "Using Mimee Bookshelf theme");
+      break;
+    }
     case CrossPointSettings::UI_THEME::NEKO: {
       auto theme = makeUniqueNoThrow<MimeeNekoTheme>();
       if (!theme) {
